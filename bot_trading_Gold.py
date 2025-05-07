@@ -4,6 +4,7 @@ import numpy as np
 import time
 from datetime import datetime
 import pytz
+import uuid
 
 # === Configuration initiale ===
 API_KEY = "K6meo5BSJuuduWI8"
@@ -20,6 +21,10 @@ headers = {
 
 # Dictionnaire pour stocker les positions ouvertes (deal_id -> {stop_level, limit_level, etc.})
 open_positions = {}
+
+# Paramètres pour la gestion du slippage
+MAX_SLIPPAGE_PERCENT = 0.5  # Slippage maximum toléré (0.5%)
+PRICE_TOLERANCE_PERCENT = 0.3  # Tolérance pour la vérification du prix actuel
 
 # === Fonction utilitaire pour les requêtes API ===
 def safe_request(method, url, headers, json=None, params=None, retries=3):
@@ -39,6 +44,13 @@ def safe_request(method, url, headers, json=None, params=None, retries=3):
                 if response.status_code == 401:
                     print("⚠️ Problème d'authentification, arrêt de la requête")
                     return None
+                if response.status_code == 400:
+                    error_message = response.json().get("errorCode", "Unknown error")
+                    print(f"⚠️ Erreur spécifique : {error_message}")
+                    if "INSUFFICIENT_FUNDS" in error_message:
+                        return {"error": "INSUFFICIENT_FUNDS"}
+                    elif "MARKET_CLOSED" in error_message:
+                        return {"error": "MARKET_CLOSED"}
                 print(f"⏳ Attente avant nouvelle tentative ({2 ** attempt} secondes)")
                 time.sleep(2 ** attempt)
         except requests.RequestException as e:
@@ -109,6 +121,60 @@ def get_margin_requirement(headers, epic):
         return margin_factor, min_size, max_size
     print(f"❌ Erreur lors de la récupération des règles pour {epic}")
     return 0.2, 0.01, 100.0
+
+# === Récupération du prix actuel ===
+def get_current_price(headers, epic):
+    print(f"📈 Récupération du prix actuel pour {epic}...")
+    url = f"{BASE_URL}/api/v1/prices/{epic}"
+    params = {"resolution": "MINUTE", "max": 1}
+    response = safe_request("GET", url, headers=headers, params=params)
+    if response:
+        prices = response.json().get("prices", [])
+        if prices and "closePrice" in prices[0]:
+            bid = prices[0]["closePrice"].get("bid", None)
+            if bid is not None:
+                print(f"📈 Prix actuel (bid) : {bid:.2f}")
+                return bid
+        print("⚠️ Données de prix invalides")
+    print("❌ Erreur lors de la récupération du prix actuel")
+    return None
+
+# === Vérification du prix avant ordre ===
+def verify_price_stability(headers, epic, expected_price):
+    print(f"🔍 Vérification de la stabilité du prix pour {epic}...")
+    current_price = get_current_price(headers, epic)
+    if current_price is None:
+        print("❌ Impossible de vérifier le prix actuel")
+        return False
+    price_diff_percent = abs(current_price - expected_price) / expected_price * 100
+    if price_diff_percent > PRICE_TOLERANCE_PERCENT:
+        print(f"⚠️ Écart de prix trop important : {price_diff_percent:.2f}% (tolérance max : {PRICE_TOLERANCE_PERCENT}%)")
+        return False
+    print(f"✅ Prix stable : écart de {price_diff_percent:.2f}%")
+    return True
+
+# === Vérification de l'exécution de l'ordre ===
+def verify_order_execution(headers, deal_id, expected_price, direction, size):
+    print(f"🔍 Vérification de l'exécution de l'ordre (ID: {deal_id})...")
+    url = f"{BASE_URL}/api/v1/confirms/{deal_id}"
+    response = safe_request("GET", url, headers=headers)
+    if response and response.ok:
+        confirmation = response.json()
+        status = confirmation.get("status", "UNKNOWN")
+        executed_price = confirmation.get("level", None)
+        if status == "OPEN" and executed_price is not None:
+            slippage_percent = abs(executed_price - expected_price) / expected_price * 100
+            if slippage_percent > MAX_SLIPPAGE_PERCENT:
+                print(f"⚠️ Slippage excessif : {slippage_percent:.2f}% (max : {MAX_SLIPPAGE_PERCENT}%)")
+                # Fermer la position immédiatement
+                close_position(headers, deal_id, direction, size, executed_price)
+                return False
+            print(f"✅ Ordre exécuté correctement à {executed_price:.2f} (slippage : {slippage_percent:.2f}%)")
+            return True
+        print(f"⚠️ Alerte: statut de l'ordre non ouvert : {status}")
+        return False
+    print(f"❌ Échec de la vérification de l'ordre (ID: {deal_id})")
+    return False
 
 # === Récupération des prix historiques ===
 def get_candles(headers, epic, resolution="MINUTE_15", limit=200):
@@ -434,6 +500,12 @@ def close_position(headers, deal_id, direction, size, current_price):
 # === Passage d'un ordre ===
 def place_order(headers, epic, direction, entry_price, df):
     print(f"📝 Préparation d'un ordre {direction} pour {epic}...")
+
+    # Vérification de la stabilité du prix
+    if not verify_price_stability(headers, epic, entry_price):
+        print(f"❌ Ordre {direction} annulé : prix instable")
+        return None, None, None, None, None
+
     available_balance = get_available_balance(headers)
     print(f"💸 Solde disponible pour l'ordre : {available_balance} EUR")
     margin_factor, min_size, max_size = get_margin_requirement(headers, epic)
@@ -470,10 +542,27 @@ def place_order(headers, epic, direction, entry_price, df):
     print(f"📊 Perte potentielle (stop-loss) : {stop_loss_percentage:.2f}%")
     print(f"📊 Gain potentiel (take-profit) : {take_profit_percentage:.2f}%")
     response = safe_request("POST", url, headers=headers, json=payload)
+
+    if isinstance(response, dict) and "error" in response:
+        error = response["error"]
+        if error == "INSUFFICIENT_FUNDS":
+            print("❌ Échec : Fonds insuffisants pour passer l'ordre")
+        elif error == "MARKET_CLOSED":
+            print("❌ Échec : Marché fermé")
+        else:
+            print(f"❌ Échec de l'ordre {direction} : {error}")
+        return None, None, None, None, None
+
     if response and response.ok:
         print(f"✅ Ordre {direction} passé avec succès (Taille: {size:.4f})")
-        # Stocker les informations de la position
         deal_id = response.json().get("dealId", "unknown")
+
+        # Vérification de l'exécution
+        if not verify_order_execution(headers, deal_id, entry_price, direction, size):
+            print(f"❌ Ordre {deal_id} annulé : problème d'exécution")
+            return None, None, None, None, None
+
+        # Stocker les informations de la position
         open_positions[deal_id] = {
             "direction": direction,
             "size": size,
@@ -485,6 +574,7 @@ def place_order(headers, epic, direction, entry_price, df):
         }
         print(f"💾 Position {deal_id} enregistrée dans open_positions")
         return response, stop, limit, stop_loss_percentage, take_profit_percentage
+
     print(f"❌ Échec de l'ordre {direction}. Réponse : {response.text if response else 'Aucune réponse'}")
     return None, None, None, None, None
 
