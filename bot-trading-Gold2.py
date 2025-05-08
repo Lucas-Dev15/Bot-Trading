@@ -118,6 +118,7 @@ def is_market_open():
 # === Récupération du solde disponible ===
 def get_available_balance(headers):
     print("💸 Vérification du solde disponible...")
+# Récupération du solde disponible
     url = f"{BASE_URL}/api/v1/accounts"
     response = safe_request("GET", url, headers=headers)
     if response:
@@ -387,9 +388,9 @@ def calculate_dynamic_thresholds(df, market="GOLD"):
     # Seuil ADX
     adx_threshold = 15 if market == "GOLD" else 10
 
-    # Variation de prix (0.03 * ATR)
-    drop_threshold = 0.03 * avg_atr / df["close"].iloc[-1] * 100
-    rise_threshold = 0.03 * avg_atr / df["close"].iloc[-1] * 100
+    # Seuils fixes pour la variation de prix
+    drop_threshold = 1.3  # Baisse de 1,3% pour achat
+    rise_threshold = 1.3  # Hausse de 1,3% pour vente
 
     print(f"📊 Seuils dynamiques : RSI Buy={rsi_buy_threshold}, RSI Sell={rsi_sell_threshold}, "
           f"ADX={adx_threshold}, Drop={drop_threshold:.2f}%, Rise={rise_threshold:.2f}%")
@@ -439,14 +440,14 @@ def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_thr
     macd_diff = abs(df["macd"].iloc[i + confirmation_period - 1] - df["macd_signal"].iloc[i + confirmation_period - 1])
     macd_threshold = 0.5 * df["atr"].iloc[i + confirmation_period - 1]
     buy_conditions = (
-        all(df["pct_change"].iloc[i:i + confirmation_period] <= -drop_threshold) and
+        all(df["pct_change"].iloc[i:i + confirmation_period] <= -drop_threshold) and  # Baisse de 1,3%
         df["rsi"].iloc[i + confirmation_period - 1] <= rsi_buy_threshold and
         df["adx"].iloc[i + confirmation_period - 1] >= adx_threshold and
         macd_diff <= macd_threshold and
         trend in ["BULLISH", "NEUTRAL"]
     )
     sell_conditions = (
-        all(df["pct_change"].iloc[i:i + confirmation_period] <= -drop_threshold) and
+        all(df["pct_change"].iloc[i:i + confirmation_period] >= rise_threshold) and  # Hausse de 1,3%
         df["rsi"].iloc[i + confirmation_period - 1] >= rsi_sell_threshold and
         df["adx"].iloc[i + confirmation_period - 1] >= adx_threshold and
         macd_diff <= macd_threshold and
@@ -490,13 +491,13 @@ def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_thr
 
     # Raisons pour l'absence de signal de vente
     if not last_row["sell_signal"]:
-        if df["pct_change"].iloc[-1] > -drop_threshold:
-            if df["pct_change"].iloc[-1] > 0:
-                sell_reasons.append(f"Le prix a augmenté de {df['pct_change'].iloc[-1]:.2f}%, besoin d'une baisse d'au moins {drop_threshold:.2f}%")
+        if df["pct_change"].iloc[-1] < rise_threshold:
+            if df["pct_change"].iloc[-1] < 0:
+                sell_reasons.append(f"Le prix a baissé de {abs(df['pct_change'].iloc[-1]):.2f}%, besoin d'une hausse d'au moins {rise_threshold:.2f}%")
             elif abs(df['pct_change'].iloc[-1]) < 0.01:
-                sell_reasons.append(f"Le prix est stable, besoin d'une baisse d'au moins {drop_threshold:.2f}%")
+                sell_reasons.append(f"Le prix est stable, besoin d'une hausse d'au moins {rise_threshold:.2f}%")
             else:
-                sell_reasons.append(f"Le prix n'a baissé que de {abs(df['pct_change'].iloc[-1]):.2f}%, besoin d'une baisse d'au moins {drop_threshold:.2f}%")
+                sell_reasons.append(f"Le prix n'a augmenté que de {df['pct_change'].iloc[-1]:.2f}%, besoin d'une hausse d'au moins {rise_threshold:.2f}%")
         if df["rsi"].iloc[-1] < rsi_sell_threshold:
             sell_reasons.append(f"RSI à {df['rsi'].iloc[-1]:.2f}, trop bas (besoin de ≥ {rsi_sell_threshold})")
         if df["adx"].iloc[-1] < adx_threshold:
@@ -829,6 +830,6 @@ if __name__ == "__main__":
     trading_bot(
         check_interval=60,
         confirmation_period=2,
-        atr_threshold=4.0,  # Corrected from atr_inode
+        atr_threshold=4.0,
         market="GOLD"
     )
