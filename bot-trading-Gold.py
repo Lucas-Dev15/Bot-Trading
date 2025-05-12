@@ -61,7 +61,7 @@ def safe_request(method, url, headers, json=None, params=None, retries=3):
                     return None
                 if response.status_code == 400:
                     error_message = response.json().get("errorCode", "Unknown error")
-                    print(f"⚠️ Erreur spécifique : {error_message}")
+                    print(f"Representations⚠️ Erreur spécifique : {error_message}")
                     if "INSUFFICIENT_FUNDS" in error_message:
                         return {"error": "INSUFFICIENT_FUNDS"}
                     elif "MARKET_CLOSED" in error_message:
@@ -134,7 +134,7 @@ def get_available_balance(headers):
         accounts = response.json().get("accounts", [])
         if accounts:
             balance = accounts[0].get("balance", {}).get("available", 0.0)
-            print(f"💰 Solde disponible : {balance} EUR")
+            print(f"💰 Solde disponible : {balance:.2f} EUR")
             return balance
     print("❌ Erreur lors de la récupération du solde")
     return 0.0
@@ -148,9 +148,9 @@ def get_margin_requirement(headers, epic):
     if response:
         data = response.json()
         margin_factor = data.get("marginFactor", 0.2)
-        min_size = data.get("minimumDealSize", 0.01)
-        max_size = data.get("maximumDealSize", 100.0)
-        print(f"📋 Règles : Marge={margin_factor*100}%, Taille min={min_size}, Taille max={max_size}")
+        min_size = round(data.get("minimumDealSize", 0.01), 2)
+        max_size = round(data.get("maximumDealSize", 100.0), 2)
+        print(f"📋 Règles : Marge={margin_factor*100}%, Taille min={min_size:.2f}, Taille max={max_size:.2f}")
         return margin_factor, min_size, max_size
     print(f"❌ Erreur lors de la récupération des règles pour {epic}")
     return 0.2, 0.01, 100.0
@@ -531,7 +531,7 @@ def is_position_open(headers, epic):
                         print(f"❌ Clé 'dealId' manquante pour la position {epic}")
                         continue
                     deal_id = position["dealId"]
-                    size = position.get("size", position.get("dealSize", position.get("contractSize", 0.0)))
+                    size = round(position.get("size", position.get("dealSize", position.get("contractSize", 0.0))), 2)
                     if size == 0.0:
                         print(f"⚠️ Taille de position non trouvée pour {epic}")
                         continue
@@ -547,7 +547,7 @@ def is_position_open(headers, epic):
                     take_profit_percentage = abs(limit_level - open_level) / open_level * 100 if limit_level is not None else 0.0
                     stop_display = f"{stop_level:.2f} ({stop_loss_percentage:.2f}%)" if stop_level is not None else "Non défini (0.00%)"
                     limit_display = f"{limit_level:.2f} ({take_profit_percentage:.2f}%)" if limit_level is not None else "Non défini (0.00%)"
-                    print(f"📍 Position ouverte : {position['direction']} (Taille: {size:.4f}, Prix d'entrée: {open_level:.2f}, Stop-loss: {stop_display}, Take-profit: {limit_display})")
+                    print(f"📍 Position ouverte : {position['direction']} (Taille: {size:.2f}, Prix d'entrée: {open_level:.2f}, Stop-loss: {stop_display}, Take-profit: {limit_display})")
                     return {
                         "direction": position["direction"],
                         "size": size,
@@ -571,13 +571,14 @@ def close_position(headers, deal_id, direction, size):
     if not deal_id:
         print("❌ Deal ID invalide, impossible de fermer la position")
         return False
+    size = round(size, 2)  # Assurer 2 décimales pour la taille
     url = f"{BASE_URL}/api/v1/positions/{deal_id}"
     payload = {
         "direction": "SELL" if direction == "BUY" else "BUY",
         "size": size,
         "orderType": "MARKET"
     }
-    print(f"📤 Envoi de la requête pour fermer : direction={payload['direction']}, taille={size:.4f}")
+    print(f"📤 Envoi de la requête pour fermer : direction={payload['direction']}, taille={size:.2f}")
     response = safe_request("DELETE", url, headers=headers, json=payload)
     if response and isinstance(response, dict) and response.get("error") == "INVALID_DEAL_ID":
         print(f"❌ Deal ID {deal_id} invalide pour la fermeture")
@@ -599,11 +600,41 @@ def place_order(headers, epic, direction, entry_price, df):
         print(f"❌ Ordre {direction} annulé : prix instable")
         return None, None, None, None, None
     available_balance = get_available_balance(headers)
-    print(f"💸 Solde disponible pour l'ordre : {available_balance} EUR")
+    print(f"💸 Solde disponible pour l'ordre : {available_balance:.2f} EUR")
     margin_factor, min_size, max_size = get_margin_requirement(headers, epic)
-    # Calculer les distances fixes pour stop-loss (2%) et take-profit (3%)
+    # Récupérer les distances min/max pour stop-loss et take-profit
+    url = f"{BASE_URL}/api/v1/markets/{epic}"
+    response = safe_request("GET", url, headers=headers)
+    min_stop_distance = 0.0
+    max_stop_distance = entry_price * 0.02
+    min_profit_distance = 0.0
+    max_profit_distance = float('inf')
+    if response and response.ok:
+        data = response.json()
+        min_stop_distance = data.get("minimumStopDistance", 0.0)
+        max_stop_distance = data.get("maximumStopDistance", entry_price * 0.02)
+        min_profit_distance = data.get("minimumProfitDistance", 0.0)
+        max_profit_distance = data.get("maximumProfitDistance", float('inf'))
+        print(f"📋 Limites : Stop min={min_stop_distance:.2f}, Stop max={max_stop_distance:.2f}, "
+              f"Profit min={min_profit_distance:.2f}, Profit max={max_profit_distance:.2f}")
+    else:
+        print(f"⚠️ Impossible de récupérer les limites, utilisation des valeurs par défaut")
+    # Calculer les distances pour stop-loss (2%) et take-profit (3%)
     stop_distance = entry_price * (STOP_LOSS_PERCENT / 100)
     profit_distance = entry_price * (TAKE_PROFIT_PERCENT / 100)
+    # Ajuster stop_distance et profit_distance selon les contraintes
+    if min_stop_distance and stop_distance < min_stop_distance:
+        print(f"⚠️ Stop-loss ajusté de {stop_distance:.2f} à {min_stop_distance:.2f} (minimum requis)")
+        stop_distance = min_stop_distance
+    if max_stop_distance and stop_distance > max_stop_distance:
+        print(f"⚠️ Stop-loss ajusté de {stop_distance:.2f} à {max_stop_distance:.2f} (maximum autorisé)")
+        stop_distance = max_stop_distance
+    if min_profit_distance and profit_distance < min_profit_distance:
+        print(f"⚠️ Take-profit ajusté de {profit_distance:.2f} à {min_profit_distance:.2f} (minimum requis)")
+        profit_distance = min_profit_distance
+    if max_profit_distance and profit_distance > max_profit_distance:
+        print(f"⚠️ Take-profit ajusté de {profit_distance:.2f} à {max_profit_distance:.2f} (maximum autorisé)")
+        profit_distance = max_profit_distance
     # Calculer les niveaux de stop-loss et take-profit
     if direction == "BUY":
         stop_level = entry_price - stop_distance
@@ -611,52 +642,43 @@ def place_order(headers, epic, direction, entry_price, df):
     else:
         stop_level = entry_price + stop_distance
         limit_level = entry_price - profit_distance
-    # Vérifier les contraintes de stop-loss de la plateforme
-    url = f"{BASE_URL}/api/v1/markets/{epic}"
-    response = safe_request("GET", url, headers=headers)
-    max_stop_distance = None
-    if response and response.ok:
-        data = response.json()
-        max_stop_distance = data.get("maxStopDistance", None)
-        if max_stop_distance is None:
-            max_stop_distance = entry_price * 0.02  # Par défaut 2%
-        print(f"📋 Contrainte stop-loss max : {max_stop_distance:.2f}")
-    else:
-        max_stop_distance = entry_price * 0.02  # Valeur par défaut
-        print(f"⚠️ Impossible de récupérer maxStopDistance, utilisation de la valeur par défaut : {max_stop_distance:.2f}")
-    # Ajuster stop_distance si nécessaire
-    if stop_distance > max_stop_distance:
-        print(f"⚠️ Stop-loss de {stop_distance:.2f} dépasse la limite max de {max_stop_distance:.2f}, ajustement à la limite")
-        stop_distance = max_stop_distance
-        if direction == "BUY":
-            stop_level = entry_price - stop_distance
-        else:
-            stop_level = entry_price + stop_distance
-    # Calculer la taille de la position
-    size = available_balance / (entry_price * margin_factor)
-    size = min(size, max_size, 0.01)  # Limiter à 0.14
+    stop_loss_percentage = (stop_distance / entry_price) * 100
+    take_profit_percentage = (profit_distance / entry_price) * 100
+    # Calculer la taille maximale en limitant l'exposition
+    print("📊 Calcul de la taille maximale...")
+    max_exposure = (available_balance - MINIMUM_BALANCE_BUFFER) * 0.95  # 95% du solde
+    size = max_exposure / entry_price
+    size = min(size, (available_balance - MINIMUM_BALANCE_BUFFER) / (entry_price * margin_factor + SPREAD_COST))
+    # Vérifier la perte potentielle
+    max_loss = available_balance * 0.05  # 5% du solde
+    if stop_distance * size > max_loss:
+        size = max_loss / stop_distance
+    # Respecter les tailles min/max
+    size = min(size, max_size)
     size = max(size, min_size)
-    size = round(size, 4)
-    # Vérifier si le solde est suffisant en incluant le spread et le buffer
+    size = round(size, 2)
+    print(f"📏 Taille initiale calculée : {size:.2f} (Min={min_size:.2f}, Max={max_size:.2f})")
+    # Vérifier le coût total
     required_margin = entry_price * size * margin_factor
     total_cost = required_margin + SPREAD_COST * size + MINIMUM_BALANCE_BUFFER
     print(f"📊 Détail des coûts : Marge={required_margin:.2f}, Spread={SPREAD_COST * size:.2f}, Buffer={MINIMUM_BALANCE_BUFFER:.2f}, Total={total_cost:.2f}")
+    print(f"📊 Exposition totale : {entry_price * size:.2f} EUR")
+    print(f"📊 Perte potentielle : {stop_distance * size:.2f} EUR")
+    # Ajuster la taille si le coût total dépasse le solde disponible
     if total_cost > available_balance:
-        print(f"⚠️ Fonds insuffisants : Coût total={total_cost:.2f} EUR, Solde disponible={available_balance:.2f} EUR")
-        # Réduire la taille de la position
+        print(f"⚠️ Coût total ({total_cost:.2f} EUR) dépasse le solde disponible ({available_balance:.2f} EUR), réduction de la taille")
         size = (available_balance - MINIMUM_BALANCE_BUFFER) / (entry_price * margin_factor + SPREAD_COST)
-        size = min(size, max_size, 0.14)  # Limiter à 0.14
+        size = min(size, max_size)
         size = max(size, min_size)
-        size = round(size, 4)
+        size = round(size, 2)
         required_margin = entry_price * size * margin_factor
         total_cost = required_margin + SPREAD_COST * size + MINIMUM_BALANCE_BUFFER
         print(f"📊 Détail des coûts ajustés : Marge={required_margin:.2f}, Spread={SPREAD_COST * size:.2f}, Buffer={MINIMUM_BALANCE_BUFFER:.2f}, Total={total_cost:.2f}")
+        print(f"📊 Exposition totale ajustée : {entry_price * size:.2f} EUR")
+        print(f"📊 Perte potentielle ajustée : {stop_distance * size:.2f} EUR")
         if total_cost > available_balance or size < min_size:
-            print(f"❌ Impossible d'ajuster la taille de la position : Taille={size:.4f}, Coût total={total_cost:.2f} EUR")
+            print(f"❌ Impossible d'ajuster la taille : Taille={size:.2f}, Coût total={total_cost:.2f} EUR")
             return None, None, None, None, None
-        print(f"🔄 Taille ajustée à {size:.4f} pour respecter le solde")
-    stop_loss_percentage = STOP_LOSS_PERCENT if stop_distance <= max_stop_distance else (stop_distance / entry_price * 100)
-    take_profit_percentage = TAKE_PROFIT_PERCENT
     # Préparer la payload de l'ordre
     payload = {
         "epic": epic,
@@ -670,7 +692,7 @@ def place_order(headers, epic, direction, entry_price, df):
     }
     # Boucle de tentatives pour passer l'ordre
     for attempt in range(MAX_ORDER_RETRIES):
-        print(f"📤 Tentative {attempt + 1} - Envoi de l'ordre {direction} : Prix={entry_price:.2f}, Stop Distance={stop_distance:.2f}, Profit Distance={profit_distance:.2f}, Taille={size:.4f}")
+        print(f"📤 Tentative {attempt + 1} - Envoi de l'ordre {direction} : Prix={entry_price:.2f}, Stop Distance={stop_distance:.2f}, Profit Distance={profit_distance:.2f}, Taille={size:.2f}")
         print(f"📊 Perte potentielle (stop-loss) : {stop_loss_percentage:.2f}%")
         print(f"📊 Gain potentiel (take-profit) : {take_profit_percentage:.2f}%")
         print(f"📝 Payload de l'ordre : {payload}")
@@ -679,48 +701,47 @@ def place_order(headers, epic, direction, entry_price, df):
         if response and isinstance(response, dict) and response.get("error") == "INVALID_STOP_LOSS":
             max_stop_value = response.get("max_stop_value")
             print(f"⚠️ Stop-loss trop éloigné, max autorisé : {max_stop_value:.2f}")
-            # Ajuster la distance du stop-loss
             if direction == "BUY":
                 stop_distance = entry_price - max_stop_value
                 stop_level = max_stop_value
             else:
                 stop_distance = max_stop_value - entry_price
                 stop_level = max_stop_value
-            # Recalculer la taille avec le nouveau stop-loss
+            stop_loss_percentage = (stop_distance / entry_price) * 100
             size = (available_balance - MINIMUM_BALANCE_BUFFER) / (entry_price * margin_factor + SPREAD_COST)
-            size = min(size, max_size, 0.14)  # Limiter à 0.14
+            size = min(size, max_size)
             size = max(size, min_size)
-            size = round(size, 4)
-            # Vérifier à nouveau le coût
+            size = round(size, 2)
             required_margin = entry_price * size * margin_factor
             total_cost = required_margin + SPREAD_COST * size + MINIMUM_BALANCE_BUFFER
             print(f"📊 Détail des coûts ajustés : Marge={required_margin:.2f}, Spread={SPREAD_COST * size:.2f}, Buffer={MINIMUM_BALANCE_BUFFER:.2f}, Total={total_cost:.2f}")
+            print(f"📊 Exposition totale ajustée : {entry_price * size:.2f} EUR")
+            print(f"📊 Perte potentielle ajustée : {stop_distance * size:.2f} EUR")
             if total_cost > available_balance or size < min_size:
-                print(f"❌ Impossible d'ajuster la taille après correction du stop-loss : Taille={size:.4f}, Coût total={total_cost:.2f} EUR")
+                print(f"❌ Impossible d'ajuster la taille après correction du stop-loss : Taille={size:.2f}, Coût total={total_cost:.2f} EUR")
                 return None, None, None, None, None
-            # Mettre à jour la payload
             payload["stopDistance"] = round(stop_distance, 2)
             payload["size"] = size
-            stop_loss_percentage = abs(stop_level - entry_price) / entry_price * 100
-            print(f"🔄 Réessai avec stop-loss ajusté : Stop Distance={stop_distance:.2f}, Taille={size:.4f}")
+            print(f"🔄 Réessai avec stop-loss ajusté : Stop Distance={stop_distance:.2f}, Taille={size:.2f}")
             print(f"📊 Perte potentielle ajustée (stop-loss) : {stop_loss_percentage:.2f}%")
-            response = safe_request("POST", url, headers=headers, json=payload)
+            continue
         if isinstance(response, dict) and "error" in response:
             error = response["error"]
             if error == "INSUFFICIENT_FUNDS":
                 print(f"❌ Échec (tentative {attempt + 1}) : Fonds insuffisants")
-                # Réduire la taille et réessayer
-                size *= 0.8  # Réduire de 20%
+                size *= 0.9
                 size = max(size, min_size)
-                size = round(size, 4)
+                size = round(size, 2)
                 required_margin = entry_price * size * margin_factor
                 total_cost = required_margin + SPREAD_COST * size + MINIMUM_BALANCE_BUFFER
                 print(f"📊 Détail des coûts ajustés : Marge={required_margin:.2f}, Spread={SPREAD_COST * size:.2f}, Buffer={MINIMUM_BALANCE_BUFFER:.2f}, Total={total_cost:.2f}")
+                print(f"📊 Exposition totale ajustée : {entry_price * size:.2f} EUR")
+                print(f"📊 Perte potentielle ajustée : {stop_distance * size:.2f} EUR")
                 if total_cost > available_balance or size < min_size:
-                    print(f"❌ Impossible d'ajuster la taille : Taille={size:.4f}, Coût total={total_cost:.2f} EUR")
+                    print(f"❌ Impossible d'ajuster la taille : Taille={size:.2f}, Coût total={total_cost:.2f} EUR")
                     return None, None, None, None, None
                 payload["size"] = size
-                print(f"🔄 Réessai avec taille réduite : Taille={size:.4f}")
+                print(f"🔄 Réessai avec taille réduite : Taille={size:.2f}")
                 continue
             elif error == "MARKET_CLOSED":
                 print("❌ Échec : Marché fermé")
@@ -728,6 +749,22 @@ def place_order(headers, epic, direction, entry_price, df):
             elif error == "INVALID_STOP_LOSS":
                 print(f"❌ Échec : Stop-loss invalide même après ajustement")
                 return None, None, None, None, None
+            elif error == "RISK_CHECK":
+                print(f"❌ Échec (tentative {attempt + 1}) : Rejet pour RISK_CHECK")
+                size *= 0.8
+                size = max(size, min_size)
+                size = round(size, 2)
+                required_margin = entry_price * size * margin_factor
+                total_cost = required_margin + SPREAD_COST * size + MINIMUM_BALANCE_BUFFER
+                print(f"📊 Détail des coûts ajustés : Marge={required_margin:.2f}, Spread={SPREAD_COST * size:.2f}, Buffer={MINIMUM_BALANCE_BUFFER:.2f}, Total={total_cost:.2f}")
+                print(f"📊 Exposition totale ajustée : {entry_price * size:.2f} EUR")
+                print(f"📊 Perte potentielle ajustée : {stop_distance * size:.2f} EUR")
+                if total_cost > available_balance or size < min_size:
+                    print(f"❌ Impossible d'ajuster la taille : Taille={size:.2f}, Coût total={total_cost:.2f} EUR")
+                    return None, None, None, None, None
+                payload["size"] = size
+                print(f"🔄 Réessai avec taille réduite pour RISK_CHECK : Taille={size:.2f}")
+                continue
             else:
                 print(f"❌ Échec de l'ordre {direction} : {error}")
                 return None, None, None, None, None
@@ -739,28 +776,28 @@ def place_order(headers, epic, direction, entry_price, df):
                 if not deal_ref:
                     print("❌ Échec : Aucun dealReference retourné par l'API")
                     return None, None, None, None, None
-                # Vérifier l'exécution de l'ordre
                 success, deal_id, executed_price = verify_order_execution(headers, deal_ref, entry_price)
                 if not success:
                     print(f"❌ Ordre {deal_ref} annulé : problème d'exécution")
                     if deal_id:
                         close_position(headers, deal_id, direction, size)
-                    # Réessayer avec une taille réduite si l'ordre a été supprimé
                     if attempt < MAX_ORDER_RETRIES - 1:
-                        size *= 0.8  # Réduire de 20%
+                        size *= 0.9
                         size = max(size, min_size)
-                        size = round(size, 4)
+                        size = round(size, 2)
                         required_margin = entry_price * size * margin_factor
                         total_cost = required_margin + SPREAD_COST * size + MINIMUM_BALANCE_BUFFER
                         print(f"📊 Détail des coûts ajustés : Marge={required_margin:.2f}, Spread={SPREAD_COST * size:.2f}, Buffer={MINIMUM_BALANCE_BUFFER:.2f}, Total={total_cost:.2f}")
+                        print(f"📊 Exposition totale ajustée : {entry_price * size:.2f} EUR")
+                        print(f"📊 Perte potentielle ajustée : {stop_distance * size:.2f} EUR")
                         if total_cost > available_balance or size < min_size:
-                            print(f"❌ Impossible d'ajuster la taille pour réessai : Taille={size:.4f}, Coût total={total_cost:.2f} EUR")
+                            print(f"❌ Impossible d'ajuster la taille pour réessai : Taille={size:.2f}, Coût total={total_cost:.2f} EUR")
                             return None, None, None, None, None
                         payload["size"] = size
-                        print(f"🔄 Réessai après ordre supprimé : Taille={size:.4f}")
+                        print(f"🔄 Réessai après ordre supprimé : Taille={size:.2f}")
                         continue
                     return None, None, None, None, None
-                print(f"✅ Ordre {direction} passé avec succès (Taille: {size:.4f}, Deal ID: {deal_id})")
+                print(f"✅ Ordre {direction} passé avec succès (Taille: {size:.2f}, Deal ID: {deal_id})")
                 open_positions[deal_id] = {
                     "direction": direction,
                     "size": size,
