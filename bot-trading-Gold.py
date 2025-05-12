@@ -5,16 +5,17 @@ import time
 from datetime import datetime, timedelta
 import pytz
 import uuid
-import csv
 import os
 
 # === Configuration initiale ===
+
 API_KEY = "K6meo5BSJuuduWI8"
 EMAIL = "5rycnytkzh@privaterelay.appleid.com"
 PASSWORD = "Lucas1234@"
 BASE_URL = "https://demo-api-capital.backend-capital.com"
 
 # Headers de base pour l'API
+
 headers = {
     "X-CAP-API-KEY": API_KEY,
     "Content-Type": "application/json",
@@ -22,7 +23,7 @@ headers = {
 }
 
 # Paramètres de trading
-RISK_PER_TRADE = 0.01  # 1% du capital par trade
+
 MAX_SLIPPAGE_PERCENT = 0.5  # Slippage maximum toléré
 PRICE_TOLERANCE_PERCENT = 0.3  # Tolérance pour la vérification du prix
 CHECK_INTERVAL = 60  # Intervalle entre les analyses (secondes)
@@ -30,12 +31,17 @@ CONFIRMATION_PERIOD = 2  # Nombre de bougies pour confirmation
 ATR_THRESHOLD = 4.0  # Seuil de volatilité
 MARKET = "GOLD"
 SPREAD_COST = 0.6  # Spread estimé pour l'or (en points)
-TRADE_LOG_FILE = "trade_log.csv"
+STOP_LOSS_PERCENT = 2.0  # Stop-loss fixe à 2%
+TAKE_PROFIT_PERCENT = 3.0  # Take-profit fixe à 3%
+MINIMUM_BALANCE_BUFFER = 1.0  # Buffer réduit à 1 EUR
+MAX_ORDER_RETRIES = 2  # Nombre maximum de tentatives pour un ordre
 
 # Dictionnaire pour stocker les positions ouvertes
+
 open_positions = {}
 
 # === Fonction utilitaire pour les requêtes API ===
+
 def safe_request(method, url, headers, json=None, params=None, retries=3):
     for attempt in range(retries):
         try:
@@ -72,11 +78,12 @@ def safe_request(method, url, headers, json=None, params=None, retries=3):
                 time.sleep(2 ** attempt)
         except requests.RequestException as e:
             print(f"❌ Erreur réseau (tentative {attempt + 1}) : {e}")
-        time.sleep(2 ** attempt)
+            time.sleep(2 ** attempt)
     print(f"❌ Échec après {retries} tentatives")
     return None
 
 # === Authentification à l'API ===
+
 def authenticate():
     print("🔐 Tentative de connexion au compte démo...")
     url = f"{BASE_URL}/api/v1/session"
@@ -90,6 +97,7 @@ def authenticate():
     return None
 
 # === Recherche du marché Gold ===
+
 def search_market(headers, search_term="GOLD"):
     print(f"🔍 Recherche du marché : {search_term}")
     url = f"{BASE_URL}/api/v1/markets"
@@ -105,6 +113,7 @@ def search_market(headers, search_term="GOLD"):
     return None
 
 # === Vérification des heures de trading ===
+
 def is_market_open():
     now = datetime.now(pytz.timezone("Europe/Paris"))
     weekday = now.weekday()
@@ -116,6 +125,7 @@ def is_market_open():
     return False
 
 # === Récupération du solde disponible ===
+
 def get_available_balance(headers):
     print("💸 Vérification du solde disponible...")
     url = f"{BASE_URL}/api/v1/accounts"
@@ -130,6 +140,7 @@ def get_available_balance(headers):
     return 0.0
 
 # === Récupération des exigences de marge ===
+
 def get_margin_requirement(headers, epic):
     print(f"📋 Récupération des règles pour {epic}...")
     url = f"{BASE_URL}/api/v1/markets/{epic}"
@@ -145,6 +156,7 @@ def get_margin_requirement(headers, epic):
     return 0.2, 0.01, 100.0
 
 # === Récupération du prix actuel ===
+
 def get_current_price(headers, epic):
     print(f"📈 Récupération du prix actuel pour {epic}...")
     url = f"{BASE_URL}/api/v1/prices/{epic}"
@@ -162,6 +174,7 @@ def get_current_price(headers, epic):
     return None
 
 # === Vérification du prix avant ordre ===
+
 def verify_price_stability(headers, epic, expected_price):
     print(f"🔍 Vérification de la stabilité du prix pour {epic}...")
     current_price = get_current_price(headers, epic)
@@ -176,58 +189,42 @@ def verify_price_stability(headers, epic, expected_price):
     return True
 
 # === Vérification de l'exécution de l'ordre ===
-def verify_order_execution(headers, deal_id, expected_price, direction, size):
-    print(f"🔍 Vérification de l'exécution de l'ordre (ID: {deal_id})...")
-    if not deal_id or deal_id == "unknown":
-        print("❌ Deal ID invalide, impossible de vérifier l'exécution")
-        return False
-    url = f"{BASE_URL}/api/v1/confirms/{deal_id}"
-    time.sleep(1)  # Short delay to allow API to process the order
+
+def verify_order_execution(headers, deal_ref, expected_price):
+    print(f"🔍 Vérification de l'exécution de l'ordre (Référence: {deal_ref})...")
+    if not deal_ref:
+        print("❌ Référence de deal invalide, impossible de vérifier l'exécution")
+        return False, None, None
+    url = f"{BASE_URL}/api/v1/confirms/{deal_ref}"
+    time.sleep(2)  # Attendre que l'API traite l'ordre
     response = safe_request("GET", url, headers=headers)
     if response and isinstance(response, dict) and response.get("error") == "INVALID_DEAL_ID":
-        print(f"❌ Deal ID {deal_id} invalide selon l'API")
-        return False
+        print(f"❌ Référence de deal {deal_ref} invalide selon l'API")
+        return False, None, None
     if response and response.ok:
         confirmation = response.json()
+        print(f"📝 Réponse complète de confirmation : {confirmation}")
         status = confirmation.get("status", "UNKNOWN")
         executed_price = confirmation.get("level", None)
-        if status == "OPEN" and executed_price is not None:
+        deal_id = None
+        affected_deals = confirmation.get("affectedDeals", [])
+        reason = confirmation.get("reason", "No reason provided")
+        if affected_deals:
+            deal_id = affected_deals[0].get("dealId")
+        if status == "OPEN" and executed_price is not None and deal_id:
             slippage_percent = abs(executed_price - expected_price) / expected_price * 100
             if slippage_percent > MAX_SLIPPAGE_PERCENT:
                 print(f"⚠️ Slippage excessif : {slippage_percent:.2f}% (max : {MAX_SLIPPAGE_PERCENT}%)")
-                close_position(headers, deal_id, direction, size, executed_price)
-                return False
+                return False, None, None
             print(f"✅ Ordre exécuté correctement à {executed_price:.2f} (slippage : {slippage_percent:.2f}%)")
-            return True
-        print(f"⚠️ Statut de l'ordre non ouvert : {status}")
-        return False
-    print(f"❌ Échec de la vérification de l'ordre (ID: {deal_id})")
-    return False
-
-# === Journalisation des trades ===
-def log_trade(deal_id, direction, size, entry_price, stop, limit, status, exit_price=None, profit_loss=None):
-    timestamp = datetime.now(pytz.timezone("Europe/Paris")).strftime("%Y-%m-%d %H:%M:%S")
-    trade_data = {
-        "timestamp": timestamp,
-        "deal_id": deal_id,
-        "direction": direction,
-        "size": size,
-        "entry_price": entry_price,
-        "stop_level": stop,
-        "limit_level": limit,
-        "status": status,
-        "exit_price": exit_price if exit_price is not None else "",
-        "profit_loss": profit_loss if profit_loss is not None else ""
-    }
-    file_exists = os.path.isfile(TRADE_LOG_FILE)
-    with open(TRADE_LOG_FILE, mode="a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=trade_data.keys())
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(trade_data)
-    print(f"📝 Trade journalisé : {status} (ID: {deal_id})")
+            return True, deal_id, executed_price
+        print(f"⚠️ Statut de l'ordre non ouvert : {status}, Raison : {reason}")
+        return False, None, None
+    print(f"❌ Échec de la vérification de l'ordre (Référence: {deal_ref})")
+    return False, None, None
 
 # === Récupération des prix historiques ===
+
 def get_candles(headers, epic, resolution="MINUTE_15", limit=200):
     print(f"📈 Récupération des prix pour {epic} (résolution : {resolution}, limite : {limit})...")
     url = f"{BASE_URL}/api/v1/prices/{epic}"
@@ -259,6 +256,7 @@ def get_candles(headers, epic, resolution="MINUTE_15", limit=200):
     return None
 
 # === Récupération des prix pour la tendance (4 heures) ===
+
 def get_trend_candles(headers, epic, resolution="HOUR_4", limit=50):
     print(f"📈 Récupération des prix pour analyse de tendance ({epic}, résolution : {resolution})...")
     url = f"{BASE_URL}/api/v1/prices/{epic}"
@@ -285,6 +283,7 @@ def get_trend_candles(headers, epic, resolution="HOUR_4", limit=50):
     return None
 
 # === Calcul du RSI ===
+
 def calculate_rsi(df, period=14):
     print(f"📊 Calcul du RSI sur {period} bougies...")
     if len(df) < period:
@@ -302,6 +301,7 @@ def calculate_rsi(df, period=14):
     return df
 
 # === Calcul de l'ADX ===
+
 def calculate_adx(df, period=14):
     print(f"📊 Calcul de l'ADX sur {period} bougies...")
     if len(df) < period * 2:
@@ -323,6 +323,7 @@ def calculate_adx(df, period=14):
     return df
 
 # === Calcul de l'ATR ===
+
 def calculate_atr(df, period=14):
     print(f"📊 Calcul de l'ATR sur {period} bougies...")
     if len(df) < period:
@@ -338,6 +339,7 @@ def calculate_atr(df, period=14):
     return df
 
 # === Calcul du MACD ===
+
 def calculate_macd(df, fast=12, slow=26, signal=9):
     print(f"📊 Calcul du MACD (fast={fast}, slow={slow}, signal={signal})...")
     if len(df) < slow:
@@ -354,6 +356,7 @@ def calculate_macd(df, fast=12, slow=26, signal=9):
     return df
 
 # === Détection de la tendance (EMA 50/200) ===
+
 def detect_trend(df_trend):
     print("🧠 Analyse de la tendance sur 4 heures...")
     if df_trend is None or len(df_trend) < 20:
@@ -373,29 +376,27 @@ def detect_trend(df_trend):
     return "NEUTRAL"
 
 # === Calcul des seuils dynamiques ===
+
 def calculate_dynamic_thresholds(df, market="GOLD"):
     print("🧠 Calcul des seuils dynamiques...")
     avg_atr = df["atr"].mean()
     atr_quantile = df["atr"].quantile(0.75)
-
     # Seuils RSI ajustés
     if avg_atr > atr_quantile:
         rsi_buy_threshold, rsi_sell_threshold = 60, 60  # Forte volatilité
     else:
         rsi_buy_threshold, rsi_sell_threshold = 60, 55  # Faible volatilité
-
     # Seuil ADX
     adx_threshold = 15 if market == "GOLD" else 10
-
     # Variation de prix (0.03 * ATR)
     drop_threshold = 0.03 * avg_atr / df["close"].iloc[-1] * 100
     rise_threshold = 0.03 * avg_atr / df["close"].iloc[-1] * 100
-
     print(f"📊 Seuils dynamiques : RSI Buy={rsi_buy_threshold}, RSI Sell={rsi_sell_threshold}, "
           f"ADX={adx_threshold}, Drop={drop_threshold:.2f}%, Rise={rise_threshold:.2f}%")
     return rsi_buy_threshold, rsi_sell_threshold, adx_threshold, drop_threshold, rise_threshold
 
 # === Détection des signaux d'achat/vente ===
+
 def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_threshold=4.0, market="GOLD"):
     print(f"🧠 Analyse des prix pour détecter des signaux (confirmation : {confirmation_period} bougies)...")
     if len(df) < periods_back + confirmation_period - 1:
@@ -403,37 +404,30 @@ def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_thr
         df["buy_signal"] = False
         df["sell_signal"] = False
         return df
-
     # Calcul des indicateurs
     df = calculate_rsi(df, period=14)
     df = calculate_adx(df, period=14)
     df = calculate_atr(df, period=14)
     df = calculate_macd(df)
-
     if df[["rsi", "adx", "atr", "macd", "macd_signal"]].isnull().any().any():
         print("⚠️ Données des indicateurs invalides, aucun signal généré")
         df["buy_signal"] = False
         df["sell_signal"] = False
         return df
-
     # Calcul des seuils dynamiques
     rsi_buy_threshold, rsi_sell_threshold, adx_threshold, drop_threshold, rise_threshold = calculate_dynamic_thresholds(df, market)
-
     df["price_60min_ago"] = df["close"].shift(periods_back)
     df["pct_change"] = (df["close"] - df["price_60min_ago"]) / df["price_60min_ago"] * 100
     df["avg_volume_50"] = df["volume"].rolling(window=50).mean()
-
     df["buy_signal"] = False
     df["sell_signal"] = False
     trend = detect_trend(df_trend)
-
     # Vérification de la volatilité
     avg_atr = df["atr"].mean()
     current_atr = df["atr"].iloc[-1]
     if current_atr > atr_threshold * avg_atr:
         print(f"⚠️ Volatilité trop élevée (ATR={current_atr:.2f}, Moyenne={avg_atr:.2f})")
         return df
-
     # Vérification des signaux
     i = len(df) - confirmation_period
     macd_diff = abs(df["macd"].iloc[i + confirmation_period - 1] - df["macd_signal"].iloc[i + confirmation_period - 1])
@@ -450,7 +444,10 @@ def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_thr
         df["rsi"].iloc[i + confirmation_period - 1] >= rsi_sell_threshold and
         df["adx"].iloc[i + confirmation_period - 1] >= adx_threshold and
         macd_diff <= macd_threshold and
-        (trend in ["BEARISH", "NEUTRAL"] or (trend == "BULLISH" and df["rsi"].iloc[i + confirmation_period - 1] > 65))
+        (
+            trend in ["BEARISH", "NEUTRAL"] or
+            (trend == "BULLISH" and df["rsi"].iloc[i + confirmation_period - 1] > 65)
+        )
     )
 
     if buy_conditions:
@@ -463,11 +460,9 @@ def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_thr
         print(f"🔔 Signal de vente confirmé : RSI={df['rsi'].iloc[i + confirmation_period - 1]:.2f}, "
               f"ADX={df['adx'].iloc[i + confirmation_period - 1]:.2f}, "
               f"MACD Diff={macd_diff:.2f}")
-
     last_row = df.iloc[-1]
     buy_reasons = []
     sell_reasons = []
-
     # Raisons pour l'absence de signal d'achat
     if not last_row["buy_signal"]:
         if df["pct_change"].iloc[-1] > -drop_threshold:
@@ -487,7 +482,6 @@ def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_thr
             buy_reasons.append(f"Tendance baissière ({trend}), pas favorable pour acheter")
         if current_atr > atr_threshold * avg_atr:
             buy_reasons.append(f"ATR à {current_atr:.2f}, volatilité trop élevée (besoin de ≤ {atr_threshold * avg_atr:.2f})")
-
     # Raisons pour l'absence de signal de vente
     if not last_row["sell_signal"]:
         if df["pct_change"].iloc[-1] > -drop_threshold:
@@ -507,7 +501,6 @@ def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_thr
             sell_reasons.append(f"Tendance haussière ({trend}) avec RSI {df['rsi'].iloc[-1]:.2f}, pas favorable pour vendre (besoin de RSI > 65)")
         if current_atr > atr_threshold * avg_atr:
             sell_reasons.append(f"ATR à {current_atr:.2f}, volatilité trop élevée (besoin de ≤ {atr_threshold * avg_atr:.2f})")
-
     print(f"📊 Résumé : Prix={last_row['close']:.2f}, RSI={last_row['rsi']:.2f}, ADX={last_row['adx']:.2f}, "
           f"MACD Diff={macd_diff:.2f}, ATR={last_row['atr']:.2f}, Tendance={trend}, Achat={last_row['buy_signal']}, Vente={last_row['sell_signal']}")
     if buy_reasons or sell_reasons:
@@ -523,6 +516,7 @@ def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_thr
     return df
 
 # === Vérification des positions ouvertes ===
+
 def is_position_open(headers, epic):
     print(f"🔍 Vérification des positions ouvertes pour {epic}...")
     url = f"{BASE_URL}/api/v1/positions"
@@ -543,21 +537,17 @@ def is_position_open(headers, epic):
                         continue
                     open_level = position.get("openLevel", position.get("level", position.get("entryPrice", 0.0)))
                     stop_level = position.get("stopLevel", None)
-                    limit_level = position.get("profitLevel", None)
-
+                    limit_level = position.get("limitLevel", None)
                     stored_position = open_positions.get(deal_id, {})
                     if stop_level is None and "stop_level" in stored_position:
                         stop_level = stored_position["stop_level"]
                     if limit_level is None and "limit_level" in stored_position:
                         limit_level = stored_position["limit_level"]
-
                     stop_loss_percentage = abs(stop_level - open_level) / open_level * 100 if stop_level is not None else 0.0
                     take_profit_percentage = abs(limit_level - open_level) / open_level * 100 if limit_level is not None else 0.0
-
                     stop_display = f"{stop_level:.2f} ({stop_loss_percentage:.2f}%)" if stop_level is not None else "Non défini (0.00%)"
                     limit_display = f"{limit_level:.2f} ({take_profit_percentage:.2f}%)" if limit_level is not None else "Non défini (0.00%)"
                     print(f"📍 Position ouverte : {position['direction']} (Taille: {size:.4f}, Prix d'entrée: {open_level:.2f}, Stop-loss: {stop_display}, Take-profit: {limit_display})")
-
                     return {
                         "direction": position["direction"],
                         "size": size,
@@ -575,17 +565,17 @@ def is_position_open(headers, epic):
     return None
 
 # === Fermeture d'une position ===
-def close_position(headers, deal_id, direction, size, current_price):
+
+def close_position(headers, deal_id, direction, size):
     print(f"🔐 Tentative de fermeture de la position (ID: {deal_id})...")
-    if not deal_id or deal_id == "unknown":
+    if not deal_id:
         print("❌ Deal ID invalide, impossible de fermer la position")
         return False
     url = f"{BASE_URL}/api/v1/positions/{deal_id}"
     payload = {
         "direction": "SELL" if direction == "BUY" else "BUY",
         "size": size,
-        "orderType": "MARKET",
-        "level": current_price
+        "orderType": "MARKET"
     }
     print(f"📤 Envoi de la requête pour fermer : direction={payload['direction']}, taille={size:.4f}")
     response = safe_request("DELETE", url, headers=headers, json=payload)
@@ -595,12 +585,6 @@ def close_position(headers, deal_id, direction, size, current_price):
     if response and response.ok:
         print(f"✅ Position fermée avec succès (ID: {deal_id})")
         if deal_id in open_positions:
-            position = open_positions[deal_id]
-            entry_price = position["open_level"]
-            size = position["size"]
-            profit_loss = (current_price - entry_price) * size if direction == "BUY" else (entry_price - current_price) * size
-            profit_loss -= SPREAD_COST * size
-            log_trade(deal_id, direction, size, entry_price, position["stop_level"], position["limit_level"], "CLOSED", current_price, profit_loss)
             del open_positions[deal_id]
             print(f"🗑️ Position {deal_id} supprimée de open_positions")
         return True
@@ -608,140 +592,196 @@ def close_position(headers, deal_id, direction, size, current_price):
     return False
 
 # === Passage d'un ordre ===
+
 def place_order(headers, epic, direction, entry_price, df):
     print(f"📝 Préparation d'un ordre {direction} pour {epic}...")
     if not verify_price_stability(headers, epic, entry_price):
         print(f"❌ Ordre {direction} annulé : prix instable")
         return None, None, None, None, None
-
     available_balance = get_available_balance(headers)
     print(f"💸 Solde disponible pour l'ordre : {available_balance} EUR")
     margin_factor, min_size, max_size = get_margin_requirement(headers, epic)
-
-    atr = df["atr"].iloc[-1]
-    stop_loss_distance = atr * 2.0  # Base stop-loss distance
-    take_profit_distance = atr * 2.0
-
-    # Fetch market details to get stop-loss constraints
+    # Calculer les distances fixes pour stop-loss (2%) et take-profit (3%)
+    stop_distance = entry_price * (STOP_LOSS_PERCENT / 100)
+    profit_distance = entry_price * (TAKE_PROFIT_PERCENT / 100)
+    # Calculer les niveaux de stop-loss et take-profit
+    if direction == "BUY":
+        stop_level = entry_price - stop_distance
+        limit_level = entry_price + profit_distance
+    else:
+        stop_level = entry_price + stop_distance
+        limit_level = entry_price - profit_distance
+    # Vérifier les contraintes de stop-loss de la plateforme
     url = f"{BASE_URL}/api/v1/markets/{epic}"
     response = safe_request("GET", url, headers=headers)
-    max_stop_loss_distance = None
+    max_stop_distance = None
     if response and response.ok:
         data = response.json()
-        max_stop_loss_distance = data.get("maxStopLossDistance", None)
-        if max_stop_loss_distance is None:
-            max_stop_loss_distance = entry_price * 0.02  # Default to 2%
-        print(f"📋 Contrainte stop-loss max : {max_stop_loss_distance:.2f}")
+        max_stop_distance = data.get("maxStopDistance", None)
+        if max_stop_distance is None:
+            max_stop_distance = entry_price * 0.02  # Par défaut 2%
+        print(f"📋 Contrainte stop-loss max : {max_stop_distance:.2f}")
     else:
-        max_stop_loss_distance = entry_price * 0.02  # Fallback
-        print(f"⚠️ Impossible de récupérer maxStopLossDistance, utilisation de la valeur par défaut : {max_stop_loss_distance:.2f}")
-
-    # Cap stop-loss distance to respect platform constraints
-    stop_loss_distance = min(stop_loss_distance, max_stop_loss_distance)
-
-    if direction == "BUY":
-        stop = entry_price - stop_loss_distance
-        limit = entry_price + take_profit_distance
-    else:
-        stop = entry_price + stop_loss_distance
-        limit = entry_price - take_profit_distance
-
-    risk_amount = available_balance * RISK_PER_TRADE
-    stop_loss_points = abs(entry_price - stop)
-    size = risk_amount / stop_loss_points
-    size = min(size, max_size)
+        max_stop_distance = entry_price * 0.02  # Valeur par défaut
+        print(f"⚠️ Impossible de récupérer maxStopDistance, utilisation de la valeur par défaut : {max_stop_distance:.2f}")
+    # Ajuster stop_distance si nécessaire
+    if stop_distance > max_stop_distance:
+        print(f"⚠️ Stop-loss de {stop_distance:.2f} dépasse la limite max de {max_stop_distance:.2f}, ajustement à la limite")
+        stop_distance = max_stop_distance
+        if direction == "BUY":
+            stop_level = entry_price - stop_distance
+        else:
+            stop_level = entry_price + stop_distance
+    # Calculer la taille de la position
+    size = available_balance / (entry_price * margin_factor)
+    size = min(size, max_size, 0.01)  # Limiter à 0.14
     size = max(size, min_size)
     size = round(size, 4)
-
-    stop_loss_percentage = abs(stop - entry_price) / entry_price * 100
-    take_profit_percentage = abs(limit - entry_price) / entry_price * 100
-
-    url = f"{BASE_URL}/api/v1/positions"
+    # Vérifier si le solde est suffisant en incluant le spread et le buffer
+    required_margin = entry_price * size * margin_factor
+    total_cost = required_margin + SPREAD_COST * size + MINIMUM_BALANCE_BUFFER
+    print(f"📊 Détail des coûts : Marge={required_margin:.2f}, Spread={SPREAD_COST * size:.2f}, Buffer={MINIMUM_BALANCE_BUFFER:.2f}, Total={total_cost:.2f}")
+    if total_cost > available_balance:
+        print(f"⚠️ Fonds insuffisants : Coût total={total_cost:.2f} EUR, Solde disponible={available_balance:.2f} EUR")
+        # Réduire la taille de la position
+        size = (available_balance - MINIMUM_BALANCE_BUFFER) / (entry_price * margin_factor + SPREAD_COST)
+        size = min(size, max_size, 0.14)  # Limiter à 0.14
+        size = max(size, min_size)
+        size = round(size, 4)
+        required_margin = entry_price * size * margin_factor
+        total_cost = required_margin + SPREAD_COST * size + MINIMUM_BALANCE_BUFFER
+        print(f"📊 Détail des coûts ajustés : Marge={required_margin:.2f}, Spread={SPREAD_COST * size:.2f}, Buffer={MINIMUM_BALANCE_BUFFER:.2f}, Total={total_cost:.2f}")
+        if total_cost > available_balance or size < min_size:
+            print(f"❌ Impossible d'ajuster la taille de la position : Taille={size:.4f}, Coût total={total_cost:.2f} EUR")
+            return None, None, None, None, None
+        print(f"🔄 Taille ajustée à {size:.4f} pour respecter le solde")
+    stop_loss_percentage = STOP_LOSS_PERCENT if stop_distance <= max_stop_distance else (stop_distance / entry_price * 100)
+    take_profit_percentage = TAKE_PROFIT_PERCENT
+    # Préparer la payload de l'ordre
     payload = {
         "epic": epic,
         "direction": direction,
         "size": size,
-        "stopLevel": round(stop, 2),
-        "limitLevel": round(limit, 2),
         "orderType": "MARKET",
-        "guaranteedStop": True
+        "guaranteedStop": True,
+        "trailingStop": False,
+        "stopDistance": round(stop_distance, 2),
+        "profitDistance": round(profit_distance, 2)
     }
-    print(f"📤 Envoi de l'ordre {direction} : Prix={entry_price:.2f}, Stop={stop:.2f}, Limit={limit:.2f}, Taille={size:.4f}")
-    print(f"📊 Perte potentielle (stop-loss) : {stop_loss_percentage:.2f}%")
-    print(f"📊 Gain potentiel (take-profit) : {take_profit_percentage:.2f}%")
-
-    response = safe_request("POST", url, headers=headers, json=payload)
-
-    if response and isinstance(response, dict) and response.get("error") == "INVALID_STOP_LOSS":
-        max_stop_value = response.get("max_stop_value")
-        print(f"⚠️ Stop-loss trop éloigné, max autorisé : {max_stop_value:.2f}")
-        # Adjust stop-loss to the maximum allowed
-        if direction == "BUY":
-            stop = max_stop_value
-            stop_loss_distance = entry_price - stop
-        else:
-            stop = max_stop_value
-            stop_loss_distance = stop - entry_price
-        # Recalculate size based on new stop-loss
-        stop_loss_points = abs(entry_price - stop)
-        size = risk_amount / stop_loss_points
-        size = min(size, max_size)
-        size = max(size, min_size)
-        size = round(size, 4)
-        # Update payload with new stop-loss and size
-        payload["stopLevel"] = round(stop, 2)
-        payload["size"] = size
-        stop_loss_percentage = abs(stop - entry_price) / entry_price * 100
-        print(f"🔄 Réessai avec stop-loss ajusté : Stop={stop:.2f}, Taille={size:.4f}")
-        print(f"📊 Perte potentielle ajustée (stop-loss) : {stop_loss_percentage:.2f}%")
+    # Boucle de tentatives pour passer l'ordre
+    for attempt in range(MAX_ORDER_RETRIES):
+        print(f"📤 Tentative {attempt + 1} - Envoi de l'ordre {direction} : Prix={entry_price:.2f}, Stop Distance={stop_distance:.2f}, Profit Distance={profit_distance:.2f}, Taille={size:.4f}")
+        print(f"📊 Perte potentielle (stop-loss) : {stop_loss_percentage:.2f}%")
+        print(f"📊 Gain potentiel (take-profit) : {take_profit_percentage:.2f}%")
+        print(f"📝 Payload de l'ordre : {payload}")
+        url = f"{BASE_URL}/api/v1/positions"
         response = safe_request("POST", url, headers=headers, json=payload)
-
-    if isinstance(response, dict) and "error" in response:
-        error = response["error"]
-        if error == "INSUFFICIENT_FUNDS":
-            print("❌ Échec : Fonds insuffisants pour passer l'ordre")
-        elif error == "MARKET_CLOSED":
-            print("❌ Échec : Marché fermé")
-        elif error == "INVALID_STOP_LOSS":
-            print(f"❌ Échec : Stop-loss invalide même après ajustement")
-        else:
-            print(f"❌ Échec de l'ordre {direction} : {error}")
+        if response and isinstance(response, dict) and response.get("error") == "INVALID_STOP_LOSS":
+            max_stop_value = response.get("max_stop_value")
+            print(f"⚠️ Stop-loss trop éloigné, max autorisé : {max_stop_value:.2f}")
+            # Ajuster la distance du stop-loss
+            if direction == "BUY":
+                stop_distance = entry_price - max_stop_value
+                stop_level = max_stop_value
+            else:
+                stop_distance = max_stop_value - entry_price
+                stop_level = max_stop_value
+            # Recalculer la taille avec le nouveau stop-loss
+            size = (available_balance - MINIMUM_BALANCE_BUFFER) / (entry_price * margin_factor + SPREAD_COST)
+            size = min(size, max_size, 0.14)  # Limiter à 0.14
+            size = max(size, min_size)
+            size = round(size, 4)
+            # Vérifier à nouveau le coût
+            required_margin = entry_price * size * margin_factor
+            total_cost = required_margin + SPREAD_COST * size + MINIMUM_BALANCE_BUFFER
+            print(f"📊 Détail des coûts ajustés : Marge={required_margin:.2f}, Spread={SPREAD_COST * size:.2f}, Buffer={MINIMUM_BALANCE_BUFFER:.2f}, Total={total_cost:.2f}")
+            if total_cost > available_balance or size < min_size:
+                print(f"❌ Impossible d'ajuster la taille après correction du stop-loss : Taille={size:.4f}, Coût total={total_cost:.2f} EUR")
+                return None, None, None, None, None
+            # Mettre à jour la payload
+            payload["stopDistance"] = round(stop_distance, 2)
+            payload["size"] = size
+            stop_loss_percentage = abs(stop_level - entry_price) / entry_price * 100
+            print(f"🔄 Réessai avec stop-loss ajusté : Stop Distance={stop_distance:.2f}, Taille={size:.4f}")
+            print(f"📊 Perte potentielle ajustée (stop-loss) : {stop_loss_percentage:.2f}%")
+            response = safe_request("POST", url, headers=headers, json=payload)
+        if isinstance(response, dict) and "error" in response:
+            error = response["error"]
+            if error == "INSUFFICIENT_FUNDS":
+                print(f"❌ Échec (tentative {attempt + 1}) : Fonds insuffisants")
+                # Réduire la taille et réessayer
+                size *= 0.8  # Réduire de 20%
+                size = max(size, min_size)
+                size = round(size, 4)
+                required_margin = entry_price * size * margin_factor
+                total_cost = required_margin + SPREAD_COST * size + MINIMUM_BALANCE_BUFFER
+                print(f"📊 Détail des coûts ajustés : Marge={required_margin:.2f}, Spread={SPREAD_COST * size:.2f}, Buffer={MINIMUM_BALANCE_BUFFER:.2f}, Total={total_cost:.2f}")
+                if total_cost > available_balance or size < min_size:
+                    print(f"❌ Impossible d'ajuster la taille : Taille={size:.4f}, Coût total={total_cost:.2f} EUR")
+                    return None, None, None, None, None
+                payload["size"] = size
+                print(f"🔄 Réessai avec taille réduite : Taille={size:.4f}")
+                continue
+            elif error == "MARKET_CLOSED":
+                print("❌ Échec : Marché fermé")
+                return None, None, None, None, None
+            elif error == "INVALID_STOP_LOSS":
+                print(f"❌ Échec : Stop-loss invalide même après ajustement")
+                return None, None, None, None, None
+            else:
+                print(f"❌ Échec de l'ordre {direction} : {error}")
+                return None, None, None, None, None
+        if response and response.ok:
+            try:
+                response_data = response.json()
+                print(f"📝 Réponse de l'API : {response_data}")
+                deal_ref = response_data.get("dealReference")
+                if not deal_ref:
+                    print("❌ Échec : Aucun dealReference retourné par l'API")
+                    return None, None, None, None, None
+                # Vérifier l'exécution de l'ordre
+                success, deal_id, executed_price = verify_order_execution(headers, deal_ref, entry_price)
+                if not success:
+                    print(f"❌ Ordre {deal_ref} annulé : problème d'exécution")
+                    if deal_id:
+                        close_position(headers, deal_id, direction, size)
+                    # Réessayer avec une taille réduite si l'ordre a été supprimé
+                    if attempt < MAX_ORDER_RETRIES - 1:
+                        size *= 0.8  # Réduire de 20%
+                        size = max(size, min_size)
+                        size = round(size, 4)
+                        required_margin = entry_price * size * margin_factor
+                        total_cost = required_margin + SPREAD_COST * size + MINIMUM_BALANCE_BUFFER
+                        print(f"📊 Détail des coûts ajustés : Marge={required_margin:.2f}, Spread={SPREAD_COST * size:.2f}, Buffer={MINIMUM_BALANCE_BUFFER:.2f}, Total={total_cost:.2f}")
+                        if total_cost > available_balance or size < min_size:
+                            print(f"❌ Impossible d'ajuster la taille pour réessai : Taille={size:.4f}, Coût total={total_cost:.2f} EUR")
+                            return None, None, None, None, None
+                        payload["size"] = size
+                        print(f"🔄 Réessai après ordre supprimé : Taille={size:.4f}")
+                        continue
+                    return None, None, None, None, None
+                print(f"✅ Ordre {direction} passé avec succès (Taille: {size:.4f}, Deal ID: {deal_id})")
+                open_positions[deal_id] = {
+                    "direction": direction,
+                    "size": size,
+                    "open_level": executed_price,
+                    "stop_level": stop_level,
+                    "limit_level": limit_level,
+                    "stop_loss_percentage": stop_loss_percentage,
+                    "take_profit_percentage": take_profit_percentage
+                }
+                print(f"💾 Position {deal_id} enregistrée dans open_positions")
+                return response, stop_level, limit_level, stop_loss_percentage, take_profit_percentage
+            except ValueError as e:
+                print(f"❌ Erreur lors de l'analyse de la réponse JSON : {e}")
+                return None, None, None, None, None
+        print(f"❌ Échec de l'ordre {direction}. Réponse : {response.text if response else 'Aucune réponse'}")
         return None, None, None, None, None
-
-    if response and response.ok:
-        try:
-            response_data = response.json()
-            print(f"📝 Réponse de l'API : {response_data}")
-            deal_id = response_data.get("dealId")
-            if not deal_id:
-                print("❌ Échec : Aucun dealId retourné par l'API")
-                return None, None, None, None, None
-            print(f"✅ Ordre {direction} passé avec succès (Taille: {size:.4f}, Deal ID: {deal_id})")
-            if not verify_order_execution(headers, deal_id, entry_price, direction, size):
-                print(f"❌ Ordre {deal_id} annulé : problème d'exécution")
-                close_position(headers, deal_id, direction, size, entry_price)
-                return None, None, None, None, None
-
-            open_positions[deal_id] = {
-                "direction": direction,
-                "size": size,
-                "open_level": entry_price,
-                "stop_level": stop,
-                "limit_level": limit,
-                "stop_loss_percentage": stop_loss_percentage,
-                "take_profit_percentage": take_profit_percentage
-            }
-            log_trade(deal_id, direction, size, entry_price, stop, limit, "OPEN")
-            print(f"💾 Position {deal_id} enregistrée dans open_positions")
-            return response, stop, limit, stop_loss_percentage, take_profit_percentage
-        except ValueError as e:
-            print(f"❌ Erreur lors de l'analyse de la réponse JSON : {e}")
-            return None, None, None, None, None
-
-    print(f"❌ Échec de l'ordre {direction}. Réponse : {response.text if response else 'Aucune réponse'}")
+    print(f"❌ Échec après {MAX_ORDER_RETRIES} tentatives")
     return None, None, None, None, None
 
 # === Boucle principale du bot ===
+
 def trading_bot(
     check_interval=60,
     confirmation_period=2,
@@ -758,7 +798,6 @@ def trading_bot(
         print(f"❌ Impossible de démarrer : aucun marché {market} trouvé")
         return
     print(f"📌 Bot configuré pour trader sur : {epic}")
-
     while True:
         try:
             print("🔄 Nouvelle itération du bot...")
@@ -766,7 +805,6 @@ def trading_bot(
                 print(f"⏳ Marché fermé, pause de {check_interval * 2} secondes")
                 time.sleep(check_interval * 2)
                 continue
-
             df = get_candles(auth_headers, epic, resolution="MINUTE_15")
             df_trend = get_trend_candles(auth_headers, epic, resolution="HOUR_4")
             if df is not None and df_trend is not None:
@@ -781,7 +819,6 @@ def trading_bot(
                 current_price = df["close"].iloc[-1]
                 signal = df.iloc[-1]
                 print(f"🔔 Résultat : Prix={current_price:.2f}, Achat={signal['buy_signal']}, Vente={signal['sell_signal']}")
-
                 position = is_position_open(auth_headers, epic)
                 if signal["buy_signal"]:
                     print("🔍 Signal d'achat détecté pour la dernière ligne")
@@ -790,7 +827,7 @@ def trading_bot(
                         continue
                     if position:
                         print("🔄 Fermeture de la position de vente pour ouvrir un achat")
-                        close_position(auth_headers, position["deal_id"], position["direction"], position["size"], current_price)
+                        close_position(auth_headers, position["deal_id"], position["direction"], position["size"])
                     print(f"📈 Passage d'un ordre d'achat à {current_price:.2f}")
                     response, stop, limit, stop_loss_percentage, take_profit_percentage = place_order(auth_headers, epic, "BUY", current_price, df)
                     if response:
@@ -804,7 +841,7 @@ def trading_bot(
                         continue
                     if position:
                         print("🔄 Fermeture de la position d'achat pour ouvrir une vente")
-                        close_position(auth_headers, position["deal_id"], position["direction"], position["size"], current_price)
+                        close_position(auth_headers, position["deal_id"], position["direction"], position["size"])
                     print(f"📉 Passage d'un ordre de vente à {current_price:.2f}")
                     response, stop, limit, stop_loss_percentage, take_profit_percentage = place_order(auth_headers, epic, "SELL", current_price, df)
                     if response:
@@ -824,11 +861,12 @@ def trading_bot(
             time.sleep(check_interval * 2)
 
 # === Lancement du bot ===
+
 if __name__ == "__main__":
     print("🎉 Lancement du bot de trading pour Gold")
     trading_bot(
         check_interval=60,
         confirmation_period=2,
-        atr_threshold=4.0,  # Corrected from atr_inode
+        atr_threshold=4.0,
         market="GOLD"
     )
