@@ -61,7 +61,7 @@ def safe_request(method, url, headers, json=None, params=None, retries=3):
                     return None
                 if response.status_code == 400:
                     error_message = response.json().get("errorCode", "Unknown error")
-                    print(f"Representations⚠️ Erreur spécifique : {error_message}")
+                    print(f"⚠️ Erreur spécifique : {error_message}")
                     if "INSUFFICIENT_FUNDS" in error_message:
                         return {"error": "INSUFFICIENT_FUNDS"}
                     elif "MARKET_CLOSED" in error_message:
@@ -388,9 +388,9 @@ def calculate_dynamic_thresholds(df, market="GOLD"):
         rsi_buy_threshold, rsi_sell_threshold = 60, 55  # Faible volatilité
     # Seuil ADX
     adx_threshold = 15 if market == "GOLD" else 10
-    # Variation de prix (0.03 * ATR)
-    drop_threshold = 0.03 * avg_atr / df["close"].iloc[-1] * 100
-    rise_threshold = 0.03 * avg_atr / df["close"].iloc[-1] * 100
+    # Variation de prix (0.03 * ATR), avec un minimum de 0.1%
+    drop_threshold = max(0.1, 0.03 * avg_atr / df["close"].iloc[-1] * 100)
+    rise_threshold = max(0.1, 0.03 * avg_atr / df["close"].iloc[-1] * 100)
     print(f"📊 Seuils dynamiques : RSI Buy={rsi_buy_threshold}, RSI Sell={rsi_sell_threshold}, "
           f"ADX={adx_threshold}, Drop={drop_threshold:.2f}%, Rise={rise_threshold:.2f}%")
     return rsi_buy_threshold, rsi_sell_threshold, adx_threshold, drop_threshold, rise_threshold
@@ -440,7 +440,7 @@ def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_thr
         trend in ["BULLISH", "NEUTRAL"]
     )
     sell_conditions = (
-        all(df["pct_change"].iloc[i:i + confirmation_period] <= -drop_threshold) and
+        all(df["pct_change"].iloc[i:i + confirmation_period] >= rise_threshold) and
         df["rsi"].iloc[i + confirmation_period - 1] >= rsi_sell_threshold and
         df["adx"].iloc[i + confirmation_period - 1] >= adx_threshold and
         macd_diff <= macd_threshold and
@@ -449,7 +449,6 @@ def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_thr
             (trend == "BULLISH" and df["rsi"].iloc[i + confirmation_period - 1] > 65)
         )
     )
-
     if buy_conditions:
         df.iloc[i + confirmation_period - 1, df.columns.get_loc("buy_signal")] = True
         print(f"🔔 Signal d'achat confirmé : RSI={df['rsi'].iloc[i + confirmation_period - 1]:.2f}, "
@@ -466,12 +465,15 @@ def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_thr
     # Raisons pour l'absence de signal d'achat
     if not last_row["buy_signal"]:
         if df["pct_change"].iloc[-1] > -drop_threshold:
-            if df["pct_change"].iloc[-1] > 0:
-                buy_reasons.append(f"Le prix a augmenté de {df['pct_change'].iloc[-1]:.2f}%, besoin d'une baisse d'au moins {drop_threshold:.2f}%")
-            elif abs(df['pct_change'].iloc[-1]) < 0.01:
-                buy_reasons.append(f"Le prix est stable, besoin d'une baisse d'au moins {drop_threshold:.2f}%")
+            total_drop_needed = df["pct_change"].iloc[-1] + drop_threshold
+            if df["pct_change"].iloc[-1] >= 0:
+                buy_reasons.append(f"Le prix a augmenté de {df['pct_change'].iloc[-1]:.2f}% depuis il y a 60 minutes. "
+                                  f"Pour un signal d'achat, il doit baisser d'au moins {drop_threshold:.2f}% par rapport à ce niveau, "
+                                  f"soit une baisse totale de {total_drop_needed:.2f}% depuis le prix actuel.")
             else:
-                buy_reasons.append(f"Le prix n'a baissé que de {abs(df['pct_change'].iloc[-1]):.2f}%, besoin d'une baisse d'au moins {drop_threshold:.2f}%")
+                buy_reasons.append(f"Le prix a baissé de {abs(df['pct_change'].iloc[-1]):.2f}% depuis il y a 60 minutes, "
+                                  f"mais une baisse d'au moins {drop_threshold:.2f}% est requise pour un signal d'achat, "
+                                  f"soit une baisse supplémentaire de {total_drop_needed:.2f}% depuis le prix actuel.")
         if df["rsi"].iloc[-1] > rsi_buy_threshold:
             buy_reasons.append(f"RSI à {df['rsi'].iloc[-1]:.2f}, trop haut (besoin de ≤ {rsi_buy_threshold})")
         if df["adx"].iloc[-1] < adx_threshold:
@@ -479,22 +481,25 @@ def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_thr
         if macd_diff > macd_threshold:
             buy_reasons.append(f"MACD diff ({macd_diff:.2f}) trop éloigné du signal (besoin de ≤ {macd_threshold:.2f})")
         if trend not in ["BULLISH", "NEUTRAL"]:
-            buy_reasons.append(f"Tendance baissière ({trend}), pas favorable pour acheter")
+            buy_reasons.append(f"T [+145 chars] endance baissière ({trend}), pas favorable pour acheter")
         if current_atr > atr_threshold * avg_atr:
             buy_reasons.append(f"ATR à {current_atr:.2f}, volatilité trop élevée (besoin de ≤ {atr_threshold * avg_atr:.2f})")
     # Raisons pour l'absence de signal de vente
     if not last_row["sell_signal"]:
-        if df["pct_change"].iloc[-1] > -drop_threshold:
-            if df["pct_change"].iloc[-1] > 0:
-                sell_reasons.append(f"Le prix a augmenté de {df['pct_change'].iloc[-1]:.2f}%, besoin d'une baisse d'au moins {drop_threshold:.2f}%")
-            elif abs(df['pct_change'].iloc[-1]) < 0.01:
-                sell_reasons.append(f"Le prix est stable, besoin d'une baisse d'au moins {drop_threshold:.2f}%")
+        if df["pct_change"].iloc[-1] < rise_threshold:
+            total_rise_needed = rise_threshold - df["pct_change"].iloc[-1]
+            if df["pct_change"].iloc[-1] <= 0:
+                sell_reasons.append(f"Le prix a baissé de {abs(df['pct_change'].iloc[-1]):.2f}% depuis il y a 60 minutes. "
+                                   f"Pour un signal de vente, il doit augmenter d'au moins {rise_threshold:.2f}% par rapport à ce niveau, "
+                                   f"soit une hausse totale de {total_rise_needed:.2f}% depuis le prix actuel.")
             else:
-                sell_reasons.append(f"Le prix n'a baissé que de {abs(df['pct_change'].iloc[-1]):.2f}%, besoin d'une baisse d'au moins {drop_threshold:.2f}%")
+                sell_reasons.append(f"Le prix a augmenté de {df['pct_change'].iloc[-1]:.2f}% depuis il y a 60 minutes, "
+                                   f"mais une hausse d'au moins {rise_threshold:.2f}% est requise pour un signal de vente, "
+                                   f"soit une hausse supplémentaire de {total_rise_needed:.2f}% depuis le prix actuel.")
         if df["rsi"].iloc[-1] < rsi_sell_threshold:
             sell_reasons.append(f"RSI à {df['rsi'].iloc[-1]:.2f}, trop bas (besoin de ≥ {rsi_sell_threshold})")
         if df["adx"].iloc[-1] < adx_threshold:
-            sell_reasons.append(f"ADX à {df['adx'].iloc[-1]:.2f}, insuffisant (besoin de ≥ {adx_threshold})")
+            sell_reasons.append(f"ADX à {df['adx']. glycol[-1]:.2f}, insuffisant (besoin de ≥ {adx_threshold})")
         if macd_diff > macd_threshold:
             sell_reasons.append(f"MACD diff ({macd_diff:.2f}) trop éloigné du signal (besoin de ≤ {macd_threshold:.2f})")
         if trend not in ["BEARISH", "NEUTRAL"] and not (trend == "BULLISH" and df["rsi"].iloc[-1] > 65):
@@ -536,13 +541,32 @@ def is_position_open(headers, epic):
                         print(f"⚠️ Taille de position non trouvée pour {epic}")
                         continue
                     open_level = position.get("openLevel", position.get("level", position.get("entryPrice", 0.0)))
-                    stop_level = position.get("stopLevel", None)
-                    limit_level = position.get("limitLevel", None)
+                    stop_level = position.get("stopLevel")
+                    limit_level = position.get("limitLevel")
                     stored_position = open_positions.get(deal_id, {})
+                    # Si stop_level ou limit_level sont absents dans l'API, utiliser les valeurs stockées
                     if stop_level is None and "stop_level" in stored_position:
                         stop_level = stored_position["stop_level"]
+                        print(f"ℹ️ Stop-level récupéré depuis open_positions : {stop_level:.2f}")
                     if limit_level is None and "limit_level" in stored_position:
                         limit_level = stored_position["limit_level"]
+                        print(f"ℹ️ Limit-level récupéré depuis open_positions : {limit_level:.2f}")
+                    # Si limit_level est toujours absent, tenter de le recalculer à partir de profit_distance
+                    if limit_level is None and "profit_distance" in stored_position and "direction" in stored_position:
+                        profit_distance = stored_position["profit_distance"]
+                        direction = stored_position["direction"]
+                        if profit_distance is not None and open_level is not None:
+                            if direction == "BUY":
+                                limit_level = open_level + profit_distance
+                            else:
+                                limit_level = open_level - profit_distance
+                            print(f"ℹ️ Limit-level recalculé à partir de profit_distance : {limit_level:.2f} (profit_distance={profit_distance:.2f})")
+                    # Si limit_level est toujours None, utiliser un fallback
+                    if limit_level is None:
+                        print(f"⚠️ Aucun limit-level trouvé pour {deal_id}. Utilisation d'un fallback basé sur TAKE_PROFIT_PERCENT")
+                        profit_distance = open_level * (TAKE_PROFIT_PERCENT / 100)
+                        limit_level = open_level + profit_distance if position["direction"] == "BUY" else open_level - profit_distance
+                        print(f"ℹ️ Fallback : Limit-level calculé à {limit_level:.2f} avec profit_distance={profit_distance:.2f}")
                     stop_loss_percentage = abs(stop_level - open_level) / open_level * 100 if stop_level is not None else 0.0
                     take_profit_percentage = abs(limit_level - open_level) / open_level * 100 if limit_level is not None else 0.0
                     stop_display = f"{stop_level:.2f} ({stop_loss_percentage:.2f}%)" if stop_level is not None else "Non défini (0.00%)"
@@ -635,6 +659,10 @@ def place_order(headers, epic, direction, entry_price, df):
     if max_profit_distance and profit_distance > max_profit_distance:
         print(f"⚠️ Take-profit ajusté de {profit_distance:.2f} à {max_profit_distance:.2f} (maximum autorisé)")
         profit_distance = max_profit_distance
+    # Vérifier que profit_distance est valide
+    if profit_distance <= 0:
+        print(f"❌ Erreur : profit_distance ({profit_distance:.2f}) est invalide ou nul")
+        return None, None, None, None, None
     # Calculer les niveaux de stop-loss et take-profit
     if direction == "BUY":
         stop_level = entry_price - stop_distance
@@ -644,6 +672,7 @@ def place_order(headers, epic, direction, entry_price, df):
         limit_level = entry_price - profit_distance
     stop_loss_percentage = (stop_distance / entry_price) * 100
     take_profit_percentage = (profit_distance / entry_price) * 100
+    print(f"📊 Niveaux calculés : Stop-level={stop_level:.2f}, Limit-level={limit_level:.2f}, Profit Distance={profit_distance:.2f}")
     # Calculer la taille maximale en limitant l'exposition
     print("📊 Calcul de la taille maximale...")
     max_exposure = (available_balance - MINIMUM_BALANCE_BUFFER) * 0.95  # 95% du solde
@@ -722,6 +751,11 @@ def place_order(headers, epic, direction, entry_price, df):
                 return None, None, None, None, None
             payload["stopDistance"] = round(stop_distance, 2)
             payload["size"] = size
+            # Recalculer limit_level après ajustement du stop
+            if direction == "BUY":
+                limit_level = entry_price + profit_distance
+            else:
+                limit_level = entry_price - profit_distance
             print(f"🔄 Réessai avec stop-loss ajusté : Stop Distance={stop_distance:.2f}, Taille={size:.2f}")
             print(f"📊 Perte potentielle ajustée (stop-loss) : {stop_loss_percentage:.2f}%")
             continue
@@ -771,7 +805,7 @@ def place_order(headers, epic, direction, entry_price, df):
         if response and response.ok:
             try:
                 response_data = response.json()
-                print(f"📝 Réponse de l'API : {response_data}")
+                print(f"📝 Réponse de l'API pour l'ordre : {response_data}")
                 deal_ref = response_data.get("dealReference")
                 if not deal_ref:
                     print("❌ Échec : Aucun dealReference retourné par l'API")
@@ -797,6 +831,12 @@ def place_order(headers, epic, direction, entry_price, df):
                         print(f"🔄 Réessai après ordre supprimé : Taille={size:.2f}")
                         continue
                     return None, None, None, None, None
+                # Vérifier si l'API a renvoyé des informations sur le take-profit
+                if limit_level is None or profit_distance is None:
+                    print(f"⚠️ Avertissement : limit_level ou profit_distance non défini avant stockage")
+                    profit_distance = entry_price * (TAKE_PROFIT_PERCENT / 100)
+                    limit_level = entry_price + profit_distance if direction == "BUY" else entry_price - profit_distance
+                    print(f"ℹ️ Recalcul : Limit-level={limit_level:.2f}, Profit Distance={profit_distance:.2f}")
                 print(f"✅ Ordre {direction} passé avec succès (Taille: {size:.2f}, Deal ID: {deal_id})")
                 open_positions[deal_id] = {
                     "direction": direction,
@@ -805,9 +845,10 @@ def place_order(headers, epic, direction, entry_price, df):
                     "stop_level": stop_level,
                     "limit_level": limit_level,
                     "stop_loss_percentage": stop_loss_percentage,
-                    "take_profit_percentage": take_profit_percentage
+                    "take_profit_percentage": take_profit_percentage,
+                    "profit_distance": profit_distance
                 }
-                print(f"💾 Position {deal_id} enregistrée dans open_positions")
+                print(f"💾 Position {deal_id} enregistrée dans open_positions : Stop={stop_level:.2f}, Limit={limit_level:.2f}, Profit Distance={profit_distance:.2f}")
                 return response, stop_level, limit_level, stop_loss_percentage, take_profit_percentage
             except ValueError as e:
                 print(f"❌ Erreur lors de l'analyse de la réponse JSON : {e}")
@@ -819,12 +860,7 @@ def place_order(headers, epic, direction, entry_price, df):
 
 # === Boucle principale du bot ===
 
-def trading_bot(
-    check_interval=60,
-    confirmation_period=2,
-    atr_threshold=4.0,
-    market="GOLD"
-):
+def trading_bot(check_interval=60, confirmation_period=2, atr_threshold=4.0, market="GOLD"):
     print("🚀 Démarrage du bot de trading...")
     auth_headers = authenticate()
     if not auth_headers:
