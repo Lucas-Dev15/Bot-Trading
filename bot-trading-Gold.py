@@ -31,8 +31,8 @@ CONFIRMATION_PERIOD = 2  # Nombre de bougies pour confirmation
 ATR_THRESHOLD = 4.0  # Seuil de volatilité
 MARKET = "GOLD"
 SPREAD_COST = 0.6  # Spread estimé pour l'or (en points)
-STOP_LOSS_PERCENT = 2.0  # Stop-loss fixe à 2%
-TAKE_PROFIT_PERCENT = 3.0  # Take-profit fixe à 3%
+STOP_LOSS_PERCENT = 1.10  # Stop-loss fixe à 1.10%
+TAKE_PROFIT_PERCENT = 0.5  # Take-profit fixe à 0.5%
 MINIMUM_BALANCE_BUFFER = 1.0  # Buffer réduit à 1 EUR
 MAX_ORDER_RETRIES = 2  # Nombre maximum de tentatives pour un ordre
 
@@ -643,7 +643,7 @@ def place_order(headers, epic, direction, entry_price, df):
               f"Profit min={min_profit_distance:.2f}, Profit max={max_profit_distance:.2f}")
     else:
         print(f"⚠️ Impossible de récupérer les limites, utilisation des valeurs par défaut")
-    # Calculer les distances pour stop-loss (2%) et take-profit (3%)
+    # Calculer les distances pour stop-loss (1.10%) et take-profit (0.5%)
     stop_distance = entry_price * (STOP_LOSS_PERCENT / 100)
     profit_distance = entry_price * (TAKE_PROFIT_PERCENT / 100)
     # Ajuster stop_distance et profit_distance selon les contraintes
