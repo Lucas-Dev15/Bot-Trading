@@ -900,4 +900,3 @@ if __name__ == "__main__":
         atr_threshold=4.0,
         market="GOLD"
     )
-    print("hello")
