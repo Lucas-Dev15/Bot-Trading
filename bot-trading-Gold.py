@@ -35,6 +35,8 @@ STOP_LOSS_PERCENT = 1.10  # Stop-loss fixe à 1.10%
 TAKE_PROFIT_PERCENT = 0.5  # Take-profit fixe à 0.5%
 MINIMUM_BALANCE_BUFFER = 1.0  # Buffer réduit à 1 EUR
 MAX_ORDER_RETRIES = 2  # Nombre maximum de tentatives pour un ordre
+LEVERAGE = 20  # Levier de 20:1
+MARGIN_FACTOR = 1 / LEVERAGE  # Marge = 5% pour un levier de 20:1
 
 # Dictionnaire pour stocker les positions ouvertes
 
@@ -147,13 +149,12 @@ def get_margin_requirement(headers, epic):
     response = safe_request("GET", url, headers=headers)
     if response:
         data = response.json()
-        margin_factor = data.get("marginFactor", 0.2)
         min_size = round(data.get("minimumDealSize", 0.01), 2)
         max_size = round(data.get("maximumDealSize", 100.0), 2)
-        print(f"📋 Règles : Marge={margin_factor*100}%, Taille min={min_size:.2f}, Taille max={max_size:.2f}")
-        return margin_factor, min_size, max_size
+        print(f"📋 Règles : Marge={MARGIN_FACTOR*100}%, Taille min={min_size:.2f}, Taille max={max_size:.2f}")
+        return MARGIN_FACTOR, min_size, max_size
     print(f"❌ Erreur lors de la récupération des règles pour {epic}")
-    return 0.2, 0.01, 100.0
+    return MARGIN_FACTOR, 0.01, 100.0
 
 # === Récupération du prix actuel ===
 
@@ -381,14 +382,11 @@ def calculate_dynamic_thresholds(df, market="GOLD"):
     print("🧠 Calcul des seuils dynamiques...")
     avg_atr = df["atr"].mean()
     atr_quantile = df["atr"].quantile(0.75)
-    # Seuils RSI ajustés
     if avg_atr > atr_quantile:
-        rsi_buy_threshold, rsi_sell_threshold = 60, 60  # Forte volatilité
+        rsi_buy_threshold, rsi_sell_threshold = 60, 60
     else:
-        rsi_buy_threshold, rsi_sell_threshold = 60, 55  # Faible volatilité
-    # Seuil ADX
+        rsi_buy_threshold, rsi_sell_threshold = 60, 55
     adx_threshold = 15 if market == "GOLD" else 10
-    # Variation de prix (0.03 * ATR), avec un minimum de 0.1%
     drop_threshold = max(0.1, 0.03 * avg_atr / df["close"].iloc[-1] * 100)
     rise_threshold = max(0.1, 0.03 * avg_atr / df["close"].iloc[-1] * 100)
     print(f"📊 Seuils dynamiques : RSI Buy={rsi_buy_threshold}, RSI Sell={rsi_sell_threshold}, "
@@ -404,7 +402,6 @@ def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_thr
         df["buy_signal"] = False
         df["sell_signal"] = False
         return df
-    # Calcul des indicateurs
     df = calculate_rsi(df, period=14)
     df = calculate_adx(df, period=14)
     df = calculate_atr(df, period=14)
@@ -414,7 +411,6 @@ def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_thr
         df["buy_signal"] = False
         df["sell_signal"] = False
         return df
-    # Calcul des seuils dynamiques
     rsi_buy_threshold, rsi_sell_threshold, adx_threshold, drop_threshold, rise_threshold = calculate_dynamic_thresholds(df, market)
     df["price_60min_ago"] = df["close"].shift(periods_back)
     df["pct_change"] = (df["close"] - df["price_60min_ago"]) / df["price_60min_ago"] * 100
@@ -422,13 +418,11 @@ def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_thr
     df["buy_signal"] = False
     df["sell_signal"] = False
     trend = detect_trend(df_trend)
-    # Vérification de la volatilité
     avg_atr = df["atr"].mean()
     current_atr = df["atr"].iloc[-1]
     if current_atr > atr_threshold * avg_atr:
         print(f"⚠️ Volatilité trop élevée (ATR={current_atr:.2f}, Moyenne={avg_atr:.2f})")
         return df
-    # Vérification des signaux
     i = len(df) - confirmation_period
     macd_diff = abs(df["macd"].iloc[i + confirmation_period - 1] - df["macd_signal"].iloc[i + confirmation_period - 1])
     macd_threshold = 0.5 * df["atr"].iloc[i + confirmation_period - 1]
@@ -462,18 +456,11 @@ def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_thr
     last_row = df.iloc[-1]
     buy_reasons = []
     sell_reasons = []
-    # Raisons pour l'absence de signal d'achat
     if not last_row["buy_signal"]:
-        if df["pct_change"].iloc[-1] > -drop_threshold:
-            total_drop_needed = df["pct_change"].iloc[-1] + drop_threshold
-            if df["pct_change"].iloc[-1] >= 0:
-                buy_reasons.append(f"Le prix a augmenté de {df['pct_change'].iloc[-1]:.2f}% depuis il y a 60 minutes. "
-                                  f"Pour un signal d'achat, il doit baisser d'au moins {drop_threshold:.2f}% par rapport à ce niveau, "
-                                  f"soit une baisse totale de {total_drop_needed:.2f}% depuis le prix actuel.")
-            else:
-                buy_reasons.append(f"Le prix a baissé de {abs(df['pct_change'].iloc[-1]):.2f}% depuis il y a 60 minutes, "
-                                  f"mais une baisse d'au moins {drop_threshold:.2f}% est requise pour un signal d'achat, "
-                                  f"soit une baisse supplémentaire de {total_drop_needed:.2f}% depuis le prix actuel.")
+        if not all(df["pct_change"].iloc[i:i + confirmation_period] <= -drop_threshold):
+            buy_reasons.append(f"La baisse de prix n'a pas été confirmée sur {confirmation_period} bougies consécutives. "
+                               f"Requis : baisse d'au moins {drop_threshold:.2f}% sur chaque bougie. "
+                               f"Valeurs observées : {df['pct_change'].iloc[i:i + confirmation_period].values}")
         if df["rsi"].iloc[-1] > rsi_buy_threshold:
             buy_reasons.append(f"RSI à {df['rsi'].iloc[-1]:.2f}, trop haut (besoin de ≤ {rsi_buy_threshold})")
         if df["adx"].iloc[-1] < adx_threshold:
@@ -481,25 +468,18 @@ def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_thr
         if macd_diff > macd_threshold:
             buy_reasons.append(f"MACD diff ({macd_diff:.2f}) trop éloigné du signal (besoin de ≤ {macd_threshold:.2f})")
         if trend not in ["BULLISH", "NEUTRAL"]:
-            buy_reasons.append(f"T [+145 chars] endance baissière ({trend}), pas favorable pour acheter")
+            buy_reasons.append(f"Tendance baissière ({trend}), pas favorable pour acheter")
         if current_atr > atr_threshold * avg_atr:
             buy_reasons.append(f"ATR à {current_atr:.2f}, volatilité trop élevée (besoin de ≤ {atr_threshold * avg_atr:.2f})")
-    # Raisons pour l'absence de signal de vente
     if not last_row["sell_signal"]:
-        if df["pct_change"].iloc[-1] < rise_threshold:
-            total_rise_needed = rise_threshold - df["pct_change"].iloc[-1]
-            if df["pct_change"].iloc[-1] <= 0:
-                sell_reasons.append(f"Le prix a baissé de {abs(df['pct_change'].iloc[-1]):.2f}% depuis il y a 60 minutes. "
-                                   f"Pour un signal de vente, il doit augmenter d'au moins {rise_threshold:.2f}% par rapport à ce niveau, "
-                                   f"soit une hausse totale de {total_rise_needed:.2f}% depuis le prix actuel.")
-            else:
-                sell_reasons.append(f"Le prix a augmenté de {df['pct_change'].iloc[-1]:.2f}% depuis il y a 60 minutes, "
-                                   f"mais une hausse d'au moins {rise_threshold:.2f}% est requise pour un signal de vente, "
-                                   f"soit une hausse supplémentaire de {total_rise_needed:.2f}% depuis le prix actuel.")
+        if not all(df["pct_change"].iloc[i:i + confirmation_period] >= rise_threshold):
+            sell_reasons.append(f"La hausse de prix n'a pas été confirmée sur {confirmation_period} bougies consécutives. "
+                                f"Requis : hausse d'au moins {rise_threshold:.2f}% sur chaque bougie. "
+                                f"Valeurs observées : {df['pct_change'].iloc[i:i + confirmation_period].values}")
         if df["rsi"].iloc[-1] < rsi_sell_threshold:
             sell_reasons.append(f"RSI à {df['rsi'].iloc[-1]:.2f}, trop bas (besoin de ≥ {rsi_sell_threshold})")
         if df["adx"].iloc[-1] < adx_threshold:
-            sell_reasons.append(f"ADX à {df['adx']. glycol[-1]:.2f}, insuffisant (besoin de ≥ {adx_threshold})")
+            sell_reasons.append(f"ADX à {df['adx'].iloc[-1]:.2f}, insuffisant (besoin de ≥ {adx_threshold})")
         if macd_diff > macd_threshold:
             sell_reasons.append(f"MACD diff ({macd_diff:.2f}) trop éloigné du signal (besoin de ≤ {macd_threshold:.2f})")
         if trend not in ["BEARISH", "NEUTRAL"] and not (trend == "BULLISH" and df["rsi"].iloc[-1] > 65):
@@ -544,14 +524,12 @@ def is_position_open(headers, epic):
                     stop_level = position.get("stopLevel")
                     limit_level = position.get("limitLevel")
                     stored_position = open_positions.get(deal_id, {})
-                    # Si stop_level ou limit_level sont absents dans l'API, utiliser les valeurs stockées
                     if stop_level is None and "stop_level" in stored_position:
                         stop_level = stored_position["stop_level"]
                         print(f"ℹ️ Stop-level récupéré depuis open_positions : {stop_level:.2f}")
                     if limit_level is None and "limit_level" in stored_position:
                         limit_level = stored_position["limit_level"]
                         print(f"ℹ️ Limit-level récupéré depuis open_positions : {limit_level:.2f}")
-                    # Si limit_level est toujours absent, tenter de le recalculer à partir de profit_distance
                     if limit_level is None and "profit_distance" in stored_position and "direction" in stored_position:
                         profit_distance = stored_position["profit_distance"]
                         direction = stored_position["direction"]
@@ -561,7 +539,6 @@ def is_position_open(headers, epic):
                             else:
                                 limit_level = open_level - profit_distance
                             print(f"ℹ️ Limit-level recalculé à partir de profit_distance : {limit_level:.2f} (profit_distance={profit_distance:.2f})")
-                    # Si limit_level est toujours None, utiliser un fallback
                     if limit_level is None:
                         print(f"⚠️ Aucun limit-level trouvé pour {deal_id}. Utilisation d'un fallback basé sur TAKE_PROFIT_PERCENT")
                         profit_distance = open_level * (TAKE_PROFIT_PERCENT / 100)
@@ -595,7 +572,7 @@ def close_position(headers, deal_id, direction, size):
     if not deal_id:
         print("❌ Deal ID invalide, impossible de fermer la position")
         return False
-    size = round(size, 2)  # Assurer 2 décimales pour la taille
+    size = round(size, 2)
     url = f"{BASE_URL}/api/v1/positions/{deal_id}"
     payload = {
         "direction": "SELL" if direction == "BUY" else "BUY",
@@ -625,8 +602,7 @@ def place_order(headers, epic, direction, entry_price, df):
         return None, None, None, None, None
     available_balance = get_available_balance(headers)
     print(f"💸 Solde disponible pour l'ordre : {available_balance:.2f} EUR")
-    margin_factor, min_size, max_size = get_margin_requirement(headers, epic)
-    # Récupérer les distances min/max pour stop-loss et take-profit
+    _, min_size, max_size = get_margin_requirement(headers, epic)  # Ignorer margin_factor de l'API
     url = f"{BASE_URL}/api/v1/markets/{epic}"
     response = safe_request("GET", url, headers=headers)
     min_stop_distance = 0.0
@@ -643,10 +619,8 @@ def place_order(headers, epic, direction, entry_price, df):
               f"Profit min={min_profit_distance:.2f}, Profit max={max_profit_distance:.2f}")
     else:
         print(f"⚠️ Impossible de récupérer les limites, utilisation des valeurs par défaut")
-    # Calculer les distances pour stop-loss (1.10%) et take-profit (0.5%)
     stop_distance = entry_price * (STOP_LOSS_PERCENT / 100)
     profit_distance = entry_price * (TAKE_PROFIT_PERCENT / 100)
-    # Ajuster stop_distance et profit_distance selon les contraintes
     if min_stop_distance and stop_distance < min_stop_distance:
         print(f"⚠️ Stop-loss ajusté de {stop_distance:.2f} à {min_stop_distance:.2f} (minimum requis)")
         stop_distance = min_stop_distance
@@ -659,11 +633,9 @@ def place_order(headers, epic, direction, entry_price, df):
     if max_profit_distance and profit_distance > max_profit_distance:
         print(f"⚠️ Take-profit ajusté de {profit_distance:.2f} à {max_profit_distance:.2f} (maximum autorisé)")
         profit_distance = max_profit_distance
-    # Vérifier que profit_distance est valide
     if profit_distance <= 0:
         print(f"❌ Erreur : profit_distance ({profit_distance:.2f}) est invalide ou nul")
         return None, None, None, None, None
-    # Calculer les niveaux de stop-loss et take-profit
     if direction == "BUY":
         stop_level = entry_price - stop_distance
         limit_level = entry_price + profit_distance
@@ -673,34 +645,23 @@ def place_order(headers, epic, direction, entry_price, df):
     stop_loss_percentage = (stop_distance / entry_price) * 100
     take_profit_percentage = (profit_distance / entry_price) * 100
     print(f"📊 Niveaux calculés : Stop-level={stop_level:.2f}, Limit-level={limit_level:.2f}, Profit Distance={profit_distance:.2f}")
-    # Calculer la taille maximale en limitant l'exposition
-    print("📊 Calcul de la taille maximale...")
-    max_exposure = (available_balance - MINIMUM_BALANCE_BUFFER) * 0.95  # 95% du solde
-    size = max_exposure / entry_price
-    size = min(size, (available_balance - MINIMUM_BALANCE_BUFFER) / (entry_price * margin_factor + SPREAD_COST))
-    # Vérifier la perte potentielle
-    max_loss = available_balance * 0.05  # 5% du solde
-    if stop_distance * size > max_loss:
-        size = max_loss / stop_distance
-    # Respecter les tailles min/max
+    print("📊 Calcul de la taille maximale avec levier 20:1...")
+    size = (available_balance - MINIMUM_BALANCE_BUFFER) / (entry_price * MARGIN_FACTOR + SPREAD_COST)
     size = min(size, max_size)
     size = max(size, min_size)
     size = round(size, 2)
-    print(f"📏 Taille initiale calculée : {size:.2f} (Min={min_size:.2f}, Max={max_size:.2f})")
-    # Vérifier le coût total
-    required_margin = entry_price * size * margin_factor
+    required_margin = entry_price * size * MARGIN_FACTOR
     total_cost = required_margin + SPREAD_COST * size + MINIMUM_BALANCE_BUFFER
     print(f"📊 Détail des coûts : Marge={required_margin:.2f}, Spread={SPREAD_COST * size:.2f}, Buffer={MINIMUM_BALANCE_BUFFER:.2f}, Total={total_cost:.2f}")
     print(f"📊 Exposition totale : {entry_price * size:.2f} EUR")
     print(f"📊 Perte potentielle : {stop_distance * size:.2f} EUR")
-    # Ajuster la taille si le coût total dépasse le solde disponible
     if total_cost > available_balance:
         print(f"⚠️ Coût total ({total_cost:.2f} EUR) dépasse le solde disponible ({available_balance:.2f} EUR), réduction de la taille")
-        size = (available_balance - MINIMUM_BALANCE_BUFFER) / (entry_price * margin_factor + SPREAD_COST)
+        size = (available_balance - MINIMUM_BALANCE_BUFFER) / (entry_price * MARGIN_FACTOR + SPREAD_COST)
         size = min(size, max_size)
         size = max(size, min_size)
         size = round(size, 2)
-        required_margin = entry_price * size * margin_factor
+        required_margin = entry_price * size * MARGIN_FACTOR
         total_cost = required_margin + SPREAD_COST * size + MINIMUM_BALANCE_BUFFER
         print(f"📊 Détail des coûts ajustés : Marge={required_margin:.2f}, Spread={SPREAD_COST * size:.2f}, Buffer={MINIMUM_BALANCE_BUFFER:.2f}, Total={total_cost:.2f}")
         print(f"📊 Exposition totale ajustée : {entry_price * size:.2f} EUR")
@@ -708,7 +669,6 @@ def place_order(headers, epic, direction, entry_price, df):
         if total_cost > available_balance or size < min_size:
             print(f"❌ Impossible d'ajuster la taille : Taille={size:.2f}, Coût total={total_cost:.2f} EUR")
             return None, None, None, None, None
-    # Préparer la payload de l'ordre
     payload = {
         "epic": epic,
         "direction": direction,
@@ -719,7 +679,6 @@ def place_order(headers, epic, direction, entry_price, df):
         "stopDistance": round(stop_distance, 2),
         "profitDistance": round(profit_distance, 2)
     }
-    # Boucle de tentatives pour passer l'ordre
     for attempt in range(MAX_ORDER_RETRIES):
         print(f"📤 Tentative {attempt + 1} - Envoi de l'ordre {direction} : Prix={entry_price:.2f}, Stop Distance={stop_distance:.2f}, Profit Distance={profit_distance:.2f}, Taille={size:.2f}")
         print(f"📊 Perte potentielle (stop-loss) : {stop_loss_percentage:.2f}%")
@@ -737,11 +696,11 @@ def place_order(headers, epic, direction, entry_price, df):
                 stop_distance = max_stop_value - entry_price
                 stop_level = max_stop_value
             stop_loss_percentage = (stop_distance / entry_price) * 100
-            size = (available_balance - MINIMUM_BALANCE_BUFFER) / (entry_price * margin_factor + SPREAD_COST)
+            size = (available_balance - MINIMUM_BALANCE_BUFFER) / (entry_price * MARGIN_FACTOR + SPREAD_COST)
             size = min(size, max_size)
             size = max(size, min_size)
             size = round(size, 2)
-            required_margin = entry_price * size * margin_factor
+            required_margin = entry_price * size * MARGIN_FACTOR
             total_cost = required_margin + SPREAD_COST * size + MINIMUM_BALANCE_BUFFER
             print(f"📊 Détail des coûts ajustés : Marge={required_margin:.2f}, Spread={SPREAD_COST * size:.2f}, Buffer={MINIMUM_BALANCE_BUFFER:.2f}, Total={total_cost:.2f}")
             print(f"📊 Exposition totale ajustée : {entry_price * size:.2f} EUR")
@@ -751,7 +710,6 @@ def place_order(headers, epic, direction, entry_price, df):
                 return None, None, None, None, None
             payload["stopDistance"] = round(stop_distance, 2)
             payload["size"] = size
-            # Recalculer limit_level après ajustement du stop
             if direction == "BUY":
                 limit_level = entry_price + profit_distance
             else:
@@ -766,7 +724,7 @@ def place_order(headers, epic, direction, entry_price, df):
                 size *= 0.9
                 size = max(size, min_size)
                 size = round(size, 2)
-                required_margin = entry_price * size * margin_factor
+                required_margin = entry_price * size * MARGIN_FACTOR
                 total_cost = required_margin + SPREAD_COST * size + MINIMUM_BALANCE_BUFFER
                 print(f"📊 Détail des coûts ajustés : Marge={required_margin:.2f}, Spread={SPREAD_COST * size:.2f}, Buffer={MINIMUM_BALANCE_BUFFER:.2f}, Total={total_cost:.2f}")
                 print(f"📊 Exposition totale ajustée : {entry_price * size:.2f} EUR")
@@ -788,7 +746,7 @@ def place_order(headers, epic, direction, entry_price, df):
                 size *= 0.8
                 size = max(size, min_size)
                 size = round(size, 2)
-                required_margin = entry_price * size * margin_factor
+                required_margin = entry_price * size * MARGIN_FACTOR
                 total_cost = required_margin + SPREAD_COST * size + MINIMUM_BALANCE_BUFFER
                 print(f"📊 Détail des coûts ajustés : Marge={required_margin:.2f}, Spread={SPREAD_COST * size:.2f}, Buffer={MINIMUM_BALANCE_BUFFER:.2f}, Total={total_cost:.2f}")
                 print(f"📊 Exposition totale ajustée : {entry_price * size:.2f} EUR")
@@ -819,7 +777,7 @@ def place_order(headers, epic, direction, entry_price, df):
                         size *= 0.9
                         size = max(size, min_size)
                         size = round(size, 2)
-                        required_margin = entry_price * size * margin_factor
+                        required_margin = entry_price * size * MARGIN_FACTOR
                         total_cost = required_margin + SPREAD_COST * size + MINIMUM_BALANCE_BUFFER
                         print(f"📊 Détail des coûts ajustés : Marge={required_margin:.2f}, Spread={SPREAD_COST * size:.2f}, Buffer={MINIMUM_BALANCE_BUFFER:.2f}, Total={total_cost:.2f}")
                         print(f"📊 Exposition totale ajustée : {entry_price * size:.2f} EUR")
@@ -831,7 +789,6 @@ def place_order(headers, epic, direction, entry_price, df):
                         print(f"🔄 Réessai après ordre supprimé : Taille={size:.2f}")
                         continue
                     return None, None, None, None, None
-                # Vérifier si l'API a renvoyé des informations sur le take-profit
                 if limit_level is None or profit_distance is None:
                     print(f"⚠️ Avertissement : limit_level ou profit_distance non défini avant stockage")
                     profit_distance = entry_price * (TAKE_PROFIT_PERCENT / 100)
