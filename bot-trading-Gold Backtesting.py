@@ -94,6 +94,9 @@ print(f"🛡️ Risques : Drawdown max = {MAX_DRAWDOWN_PERCENT}%, Trailing stop 
 # Dictionnaire pour stocker les positions ouvertes
 open_positions = {}
 
+# Variable globale pour le pic d'équité
+peak_equity = INITIAL_BALANCE  # Initialisé au solde de départ
+
 # === Fonction utilitaire pour requêtes API ===
 def safe_request(method, url, headers, json=None, params=None, retries=3):
     log_message(f"🌐 Envoi requête : {method} {url} (tentatives max: {retries})")
@@ -197,19 +200,24 @@ def is_market_open():
     log_message("   ✅ Marché ouvert et pas d'annonces en cours.")
     return True
 
-# === Récupération du solde disponible ===
-def get_available_balance(headers):
-    log_message("\n💸 Étape 4 : Vérification du solde disponible...")
+# === Récupération des soldes (available et equity) ===
+def get_balances(headers):
+    log_message("\n💸 Récupération des soldes (available et equity)...")
     url = f"{BASE_URL}/api/v1/accounts"
     response = safe_request("GET", url, headers=headers)
     if response:
         accounts = response.json().get("accounts", [])
         if accounts:
-            balance = accounts[0].get("balance", {}).get("available", 0.0)
-            log_message(f"   ✅ Solde disponible : {balance:.2f} EUR")
-            return balance
-    log_message("   ❌ Erreur lors de la récupération du solde.")
-    return 0.0
+            balance_data = accounts[0].get("balance", {})
+            available = balance_data.get("available", 0.0)
+            # Calcul de l'equity : funds ("balance") + profitLoss
+            funds = balance_data.get("balance", 0.0)  # Ou "deposit" si c'est funds
+            profit_loss = balance_data.get("profitLoss", 0.0)
+            equity = funds + profit_loss  # Equity réelle
+            log_message(f"   ✅ Available : {available:.2f} EUR | Equity : {equity:.2f} EUR | P&L : {profit_loss:.2f} EUR")
+            return available, equity
+    log_message("   ❌ Erreur lors de la récupération des soldes.")
+    return 0.0, 0.0  # Fallback
 
 # === Récupération des exigences de marge ===
 def get_margin_requirement(headers, epic):
@@ -736,8 +744,8 @@ def place_order(headers, epic, direction, entry_price, df):
         log_message(f"   ❌ Ordre {direction} annulé : Prix trop instable.")
         return None, None, None, None, None
     log_message("   Sous-étape 2 : Récupération solde disponible...")
-    available_balance = get_available_balance(headers)
-    log_message(f"   Solde disponible : {available_balance:.2f} EUR")
+    available, _ = get_balances(headers)  # Utilise available pour les trades
+    log_message(f"   Solde disponible : {available:.2f} EUR")
     log_message("   Sous-étape 3 : Récupération exigences de marge...")
     _, min_size, max_size = get_margin_requirement(headers, epic)
     log_message(f"   Contraintes taille : Min={min_size:.2f}, Max={max_size:.2f}")
@@ -787,7 +795,7 @@ def place_order(headers, epic, direction, entry_price, df):
     spread_cost = min(spread if spread is not None else 0.1, MAX_SPREAD_COST)
     log_message(f"   Spread actuel : {spread_cost:.2f}")
     log_message(f"   Calcul taille pour risquer {RISK_PER_TRADE*100}% du solde avec levier {LEVERAGE}:1...")
-    size = (available_balance * RISK_PER_TRADE - MINIMUM_BALANCE_BUFFER) / (entry_price * MARGIN_FACTOR + spread_cost)
+    size = (available * RISK_PER_TRADE - MINIMUM_BALANCE_BUFFER) / (entry_price * MARGIN_FACTOR + spread_cost)
     log_message(f"   Taille brute calculée : {size:.4f}")
     size = max(size, min_size)
     if size > min_size:
@@ -801,16 +809,16 @@ def place_order(headers, epic, direction, entry_price, df):
     log_message(f"   Buffer = {MINIMUM_BALANCE_BUFFER:.2f} EUR, Total coût = {total_cost:.2f} EUR")
     log_message(f"   Exposition totale : {entry_price * size:.2f} EUR")
     log_message(f"   Perte potentielle (stop-loss) : {stop_distance * size:.1f} EUR")
-    if total_cost > available_balance:
-        log_message(f"   ⚠️ Coût total ({total_cost:.2f}) > solde ({available_balance:.2f}). Réduction taille...")
-        size = (available_balance * RISK_PER_TRADE - MINIMUM_BALANCE_BUFFER) / (entry_price * MARGIN_FACTOR + spread_cost)
+    if total_cost > available:
+        log_message(f"   ⚠️ Coût total ({total_cost:.2f}) > solde ({available:.2f}). Réduction taille...")
+        size = (available * RISK_PER_TRADE - MINIMUM_BALANCE_BUFFER) / (entry_price * MARGIN_FACTOR + spread_cost)
         size = max(size, min_size)
         size = min(size, max_size)
         size = round(size, 2)
         required_margin = entry_price * size * MARGIN_FACTOR
         total_cost = required_margin + spread_cost * size + MINIMUM_BALANCE_BUFFER
         log_message(f"   Nouvelle taille : {size:.2f}, Nouveau total : {total_cost:.2f} EUR")
-        if total_cost > available_balance or size < min_size:
+        if total_cost > available or size < min_size:
             log_message(f"   ❌ Impossible d'ajuster. Ordre annulé.")
             return None, None, None, None, None
     adjusted_stop_distance = stop_distance
@@ -891,7 +899,7 @@ def place_order(headers, epic, direction, entry_price, df):
             if abs(adjusted_stop_distance - stop_distance) < 0.1:
                 log_message(f"   ❌ Stop Distance {adjusted_stop_distance:.1f} déjà optimisé, abandon après {attempt + 1} tentatives")
                 return None, None, None, None, None
-            size = (available_balance * RISK_PER_TRADE - MINIMUM_BALANCE_BUFFER) / (entry_price * MARGIN_FACTOR + spread_cost)
+            size = (available * RISK_PER_TRADE - MINIMUM_BALANCE_BUFFER) / (entry_price * MARGIN_FACTOR + spread_cost)
             log_message(f"   📊 Taille recalculée après ajustement stop-loss : {size:.4f}")
             size = max(size, min_size)
             size = min(size, max_size)
@@ -901,7 +909,7 @@ def place_order(headers, epic, direction, entry_price, df):
             log_message(f"   📊 Détail des coûts ajustés : Marge={required_margin:.2f}, Spread={spread_cost * size:.2f}, Buffer={MINIMUM_BALANCE_BUFFER:.2f}, Total={total_cost:.2f}")
             log_message(f"   📊 Exposition totale ajustée : {entry_price * size:.2f} EUR")
             log_message(f"   📊 Perte potentielle ajustée : {adjusted_stop_distance * size:.1f} EUR")
-            if total_cost > available_balance or size < min_size:
+            if total_cost > available or size < min_size:
                 log_message(f"   ❌ Impossible d'ajuster la taille après correction du stop-loss : Taille={size:.2f}, Coût total={total_cost:.2f} EUR")
                 return None, None, None, None, None
             if direction == "BUY":
@@ -925,7 +933,7 @@ def place_order(headers, epic, direction, entry_price, df):
                 log_message(f"   📊 Détail des coûts ajustés : Marge={required_margin:.2f}, Spread={spread_cost * size:.2f}, Buffer={MINIMUM_BALANCE_BUFFER:.2f}, Total={total_cost:.2f}")
                 log_message(f"   📊 Exposition totale ajustée : {entry_price * size:.2f} EUR")
                 log_message(f"   📊 Perte potentielle ajustée : {adjusted_stop_distance * size:.1f} EUR")
-                if total_cost > available_balance or size < min_size:
+                if total_cost > available or size < min_size:
                     log_message(f"   ❌ Impossible d'ajuster la taille : Taille={size:.2f}, Coût total={total_cost:.2f} EUR")
                     return None, None, None, None, None
                 payload["size"] = float(size)
@@ -945,7 +953,7 @@ def place_order(headers, epic, direction, entry_price, df):
                 log_message(f"   📊 Détail des coûts ajustés : Marge={required_margin:.2f}, Spread={spread_cost * size:.2f}, Buffer={MINIMUM_BALANCE_BUFFER:.2f}, Total={total_cost:.2f}")
                 log_message(f"   📊 Exposition totale ajustée : {entry_price * size:.2f} EUR")
                 log_message(f"   📊 Perte potentielle ajustée : {adjusted_stop_distance * size:.1f} EUR")
-                if total_cost > available_balance or size < min_size:
+                if total_cost > available or size < min_size:
                     log_message(f"   ❌ Impossible d'ajuster la taille : Taille={size:.2f}, Coût total={total_cost:.2f} EUR")
                     return None, None, None, None, None
                 payload["size"] = float(size)
@@ -1169,6 +1177,7 @@ def optimize_parameters(headers, epic, initial_balance=10000.0, start_date=None,
 
 # === Boucle principale bot ===
 def trading_bot(check_interval=60, confirmation_period=2, atr_threshold=4.0, market="GOLD"):
+    global peak_equity
     log_message("\n🚀 === DÉMARRAGE DU BOT EN LIVE ===")
     log_message(f"   Intervalle check : {check_interval}s | Marché : {market} | Compteur itérations : 0")
     auth_headers = authenticate()
@@ -1188,10 +1197,20 @@ def trading_bot(check_interval=60, confirmation_period=2, atr_threshold=4.0, mar
         log_message(f"{'='*50}")
         try:
             log_message("   Check drawdown...")
-            balance = get_available_balance(auth_headers)
-            drawdown = ((INITIAL_BALANCE - balance) / INITIAL_BALANCE) * 100
-            log_message(f"   Solde actuel : {balance:.2f} EUR | Drawdown : {drawdown:.2f}%")
-            if balance < INITIAL_BALANCE * (1 - MAX_DRAWDOWN_PERCENT / 100):
+            available, equity = get_balances(auth_headers)
+            # Mise à jour du pic sur equity
+            if equity > peak_equity:
+                peak_equity = equity
+                log_message(f"   📈 Nouveau pic d'équité : {peak_equity:.2f} EUR")
+            # Calcul drawdown sur equity
+            if peak_equity > 0:
+                drawdown = ((peak_equity - equity) / peak_equity) * 100
+            else:
+                drawdown = 0.0
+            log_message(f"   Equity actuelle : {equity:.2f} EUR | Drawdown (du pic) : {drawdown:.2f}% | Pic equity : {peak_equity:.2f} EUR")
+            log_message(f"   Available (pour trades) : {available:.2f} EUR")
+            # Vérification sur drawdown d'equity
+            if drawdown > MAX_DRAWDOWN_PERCENT:
                 log_message(f"   ❌ Drawdown max atteint ({drawdown:.2f}% > {MAX_DRAWDOWN_PERCENT}%). ARRÊT BOT.", "error")
                 break
             if not is_market_open():
