@@ -207,17 +207,30 @@ def get_balances(headers):
     response = safe_request("GET", url, headers=headers)
     if response:
         accounts = response.json().get("accounts", [])
+        log_message(f"   📝 Réponse JSON complète des comptes : {response.json()}")  # Log complet pour debug
         if accounts:
             balance_data = accounts[0].get("balance", {})
             available = balance_data.get("available", 0.0)
-            # Calcul de l'equity : funds ("balance") + profitLoss
-            funds = balance_data.get("balance", 0.0)  # Ou "deposit" si c'est funds
+            # Funds : Utiliser 'balance' ou 'deposit' (selon doc Capital.com, 'balance' est souvent Funds)
+            funds = balance_data.get("balance", balance_data.get("deposit", 0.0))  # Fallback sur 'deposit' si 'balance' est 0
             profit_loss = balance_data.get("profitLoss", 0.0)
-            equity = funds + profit_loss  # Equity réelle
-            log_message(f"   ✅ Available : {available:.2f} EUR | Equity : {equity:.2f} EUR | P&L : {profit_loss:.2f} EUR")
-            return available, equity
+            equity = funds + profit_loss  # Equity réelle (Funds + P&L)
+            log_message(f"   📊 Détails API : Funds={funds:.2f} EUR | P&L={profit_loss:.2f} EUR | Available={available:.2f} EUR | Equity={equity:.2f} EUR")
+            return available, equity, funds  # Retourne aussi Funds pour drawdown
     log_message("   ❌ Erreur lors de la récupération des soldes.")
-    return 0.0, 0.0  # Fallback
+    return 0.0, 0.0, 0.0  # Fallback
+
+# === Top-up du compte démo ===
+def topup_account(headers, amount=2000.0):
+    log_message(f"💰 Top-up du compte démo de {amount} EUR...")
+    url = f"{BASE_URL}/api/v1/accounts/topUp"
+    payload = {"amount": amount}
+    response = safe_request("POST", url, headers=headers, json=payload)
+    if response and response.ok:
+        log_message("   ✅ Top-up réussi !")
+        return True
+    log_message("   ❌ Échec top-up.", "error")
+    return False
 
 # === Récupération des exigences de marge ===
 def get_margin_requirement(headers, epic):
@@ -744,7 +757,7 @@ def place_order(headers, epic, direction, entry_price, df):
         log_message(f"   ❌ Ordre {direction} annulé : Prix trop instable.")
         return None, None, None, None, None
     log_message("   Sous-étape 2 : Récupération solde disponible...")
-    available, _ = get_balances(headers)  # Utilise available pour les trades
+    available, _, _ = get_balances(headers)  # Utilise available pour les trades
     log_message(f"   Solde disponible : {available:.2f} EUR")
     log_message("   Sous-étape 3 : Récupération exigences de marge...")
     _, min_size, max_size = get_margin_requirement(headers, epic)
@@ -1197,21 +1210,32 @@ def trading_bot(check_interval=60, confirmation_period=2, atr_threshold=4.0, mar
         log_message(f"{'='*50}")
         try:
             log_message("   Check drawdown...")
-            available, equity = get_balances(auth_headers)
-            # Mise à jour du pic sur equity
-            if equity > peak_equity:
-                peak_equity = equity
-                log_message(f"   📈 Nouveau pic d'équité : {peak_equity:.2f} EUR")
-            # Calcul drawdown sur equity
+            available, equity, funds = get_balances(auth_headers)  # Récupère aussi funds
+            # Top-up si funds bas
+            if funds < 100:
+                topup_account(auth_headers, 2000)
+                # Re-récupérer après top-up
+                available, equity, funds = get_balances(auth_headers)
+            # Fermeture forcée si equity négative
+            if equity < 0:
+                position = is_position_open(auth_headers, epic)
+                if position:
+                    log_message("   ⚠️ Equity négative : Fermeture forcée de la position.")
+                    close_position(auth_headers, position["deal_id"], position["direction"], position["size"])
+            # Mise à jour du pic sur Funds (pour matcher UI positive)
+            if funds > peak_equity:
+                peak_equity = funds
+                log_message(f"   📈 Nouveau pic de Funds : {peak_equity:.2f} EUR")
+            # Calcul drawdown sur Funds (ignore P&L non réalisé)
             if peak_equity > 0:
-                drawdown = ((peak_equity - equity) / peak_equity) * 100
+                drawdown = ((peak_equity - funds) / peak_equity) * 100
             else:
                 drawdown = 0.0
-            log_message(f"   Equity actuelle : {equity:.2f} EUR | Drawdown (du pic) : {drawdown:.2f}% | Pic equity : {peak_equity:.2f} EUR")
+            log_message(f"   Funds (UI-like) : {funds:.2f} EUR | Equity réelle : {equity:.2f} EUR | Drawdown (Funds) : {drawdown:.2f}% | Pic : {peak_equity:.2f} EUR")
             log_message(f"   Available (pour trades) : {available:.2f} EUR")
-            # Vérification sur drawdown d'equity
+            # Vérification drawdown sur Funds (plus tolérant)
             if drawdown > MAX_DRAWDOWN_PERCENT:
-                log_message(f"   ❌ Drawdown max atteint ({drawdown:.2f}% > {MAX_DRAWDOWN_PERCENT}%). ARRÊT BOT.", "error")
+                log_message(f"   ❌ Drawdown max sur Funds atteint ({drawdown:.2f}% > {MAX_DRAWDOWN_PERCENT}%). ARRÊT BOT.", "error")
                 break
             if not is_market_open():
                 log_message(f"   ⏳ Marché fermé ou news en cours. Pause {check_interval * 2}s.")
