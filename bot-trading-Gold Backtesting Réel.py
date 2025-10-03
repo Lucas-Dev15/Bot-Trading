@@ -51,7 +51,7 @@ else:
 API_KEY = "K6meo5BSJuuduWI8"
 EMAIL = "5rycnytkzh@privaterelay.appleid.com"
 PASSWORD = "Lucas1234@"
-BASE_URL = "https://demo-api-capital.backend-capital.com"
+BASE_URL = "https://api-capital.backend-capital.com"
 
 print("🚀 Démarrage du bot - Chargement des configurations...")
 print(f"📧 Email chargé : {EMAIL[:5]}... (caché pour sécurité)")
@@ -68,7 +68,7 @@ headers = {
 MAX_SLIPPAGE_PERCENT = 0.5  # Slippage maximum toléré
 PRICE_TOLERANCE_PERCENT = 0.3  # Tolérance pour la vérification du prix
 CHECK_INTERVAL = 60  # Intervalle entre les analyses (secondes)
-CONFIRMATION_PERIOD = 3  # Nombre de bougies pour confirmation
+CONFIRMATION_PERIOD = 2  # Nombre de bougies pour confirmation
 ATR_THRESHOLD = 4.0  # Seuil de volatilité
 MARKET = "GOLD"
 SL_ATR_MULTIPLIER = 2.0  # Multiplicateur pour stop-loss
@@ -77,14 +77,14 @@ MINIMUM_BALANCE_BUFFER = 1.0  # Buffer minimum (EUR)
 MAX_ORDER_RETRIES = 3  # Nombre max de tentatives pour un ordre
 LEVERAGE = 20  # Levier de 20:1
 MARGIN_FACTOR = 1 / LEVERAGE  # Marge = 5%
-RISK_PER_TRADE = 0.5  # Risque 50% du solde par position
+RISK_PER_TRADE = 0.8  # Risque 80% du solde par position
 MAX_SPREAD_COST = 2.0  # Limite spread
 STOP_LOSS_PERCENT = 1.10  # Fallback stop-loss (%)
 TAKE_PROFIT_PERCENT = 0.5  # Fallback take-profit (%)
 MAX_DRAWDOWN_PERCENT = 20.0  # Arrêt si perte > 20%
-TRAILING_STOP_ENABLED = True  # Activé pour tester
+TRAILING_STOP_ENABLED = False  # Désactivé pour éviter le conflit avec guaranteedStop
 VOLUME_THRESHOLD_MULTIPLIER = 1.2  # Volume doit être 1.2x la moyenne
-INITIAL_BALANCE = 1000.0  # Solde initial pour drawdown
+INITIAL_BALANCE = 30.0  # Solde initial pour drawdown
 NEWS_AVOID_TIMES = [(14, 30), (15, 0)]  # Éviter trades ±30min autour de ces heures
 
 print(f"⚙️ Paramètres chargés : Risque par trade = {RISK_PER_TRADE*100}%, Levier = {LEVERAGE}:1")
@@ -152,7 +152,7 @@ def safe_request(method, url, headers, json=None, params=None, retries=3):
 
 # === Authentification ===
 def authenticate():
-    log_message("\n🔐 Étape 1 : Connexion au compte démo...")
+    log_message("\n🔐 Étape 1 : Connexion au compte réel...")
     url = f"{BASE_URL}/api/v1/session"
     payload = {"identifier": EMAIL, "password": PASSWORD}
     log_message(f"   Envoi payload : identifier={EMAIL}, password=*** (caché)")
@@ -219,18 +219,6 @@ def get_balances(headers):
             return available, equity, funds  # Retourne aussi Funds pour drawdown
     log_message("   ❌ Erreur lors de la récupération des soldes.")
     return 0.0, 0.0, 0.0  # Fallback
-
-# === Top-up du compte démo ===
-def topup_account(headers, amount=2000.0):
-    log_message(f"💰 Top-up du compte démo de {amount} EUR...")
-    url = f"{BASE_URL}/api/v1/accounts/topUp"
-    payload = {"amount": amount}
-    response = safe_request("POST", url, headers=headers, json=payload)
-    if response and response.ok:
-        log_message("   ✅ Top-up réussi !")
-        return True
-    log_message("   ❌ Échec top-up.", "error")
-    return False
 
 # === Récupération des exigences de marge ===
 def get_margin_requirement(headers, epic):
@@ -520,14 +508,14 @@ def calculate_dynamic_thresholds(df, market="GOLD"):
     atr_quantile = df["atr"].quantile(0.75)
     log_message(f"   ATR moyen : {avg_atr:.2f}, ATR quantile 75% : {atr_quantile:.2f}")
     if avg_atr > atr_quantile:
-        rsi_buy_threshold, rsi_sell_threshold = 50, 70  # Volatile : BUY plus facile, SELL plus dur
-        log_message("   Marché volatile : Seuils RSI ajustés à 50/70.")
+        rsi_buy_threshold, rsi_sell_threshold = 60, 60
+        log_message("   Marché volatile : Seuils RSI ajustés à 60/60.")
     else:
-        rsi_buy_threshold, rsi_sell_threshold = 45, 65  # Calme : BUY encore plus facile
-        log_message("   Marché calme : Seuils RSI à 45/65.")
+        rsi_buy_threshold, rsi_sell_threshold = 60, 55
+        log_message("   Marché calme : Seuils RSI à 60/55.")
     adx_threshold = 15 if market == "GOLD" else 10
-    drop_threshold = max(0.05, 0.02 * avg_atr / df["close"].iloc[-1] * 100)  # Réduit à 0.05% min et 0.02x ATR pour plus de BUY
-    rise_threshold = max(0.15, 0.04 * avg_atr / df["close"].iloc[-1] * 100)  # Augmente à 0.15% min et 0.04x ATR pour moins de SELL
+    drop_threshold = max(0.1, 0.03 * avg_atr / df["close"].iloc[-1] * 100)
+    rise_threshold = max(0.1, 0.03 * avg_atr / df["close"].iloc[-1] * 100)
     log_message(f"   Seuils finaux : RSI Achat={rsi_buy_threshold}, Vente={rsi_sell_threshold}, ADX≥{adx_threshold}")
     log_message(f"   Seuil baisse : {drop_threshold:.2f}%, Hausse : {rise_threshold:.2f}%")
     return rsi_buy_threshold, rsi_sell_threshold, adx_threshold, drop_threshold, rise_threshold
@@ -571,16 +559,15 @@ def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_thr
     macd_threshold = 0.5 * df["atr"].iloc[i + confirmation_period - 1]
     log_message(f"   Différence MACD : {macd_diff:.4f}, Seuil MACD : {macd_threshold:.2f}")
     log_message("   Vérification conditions d'achat...")
-    bb_tolerance_buy = 0.005  # Plus large pour BUY
-    bb_tolerance_sell = 0.002  # Strict pour SELL
+    bb_tolerance = 0.002  # Tolérance de 0.2% pour les bandes de Bollinger
     buy_conditions = (
         df["pct_change"].iloc[i + confirmation_period - 1] <= -drop_threshold and  # Baisse sur la dernière bougie
         df["rsi"].iloc[i + confirmation_period - 1] <= rsi_buy_threshold and
         df["adx"].iloc[i + confirmation_period - 1] >= adx_threshold and
         macd_diff <= macd_threshold and
         trend in ["BULLISH", "NEUTRAL"] and
-        df["close"].iloc[i + confirmation_period - 1] <= df["bb_lower"].iloc[i + confirmation_period - 1] * (1 + bb_tolerance_buy) and
-        df["volume"].iloc[i + confirmation_period - 1] > df["avg_volume_50"].iloc[i + confirmation_period - 1] * 0.8  # Plus facile pour BUY
+        df["close"].iloc[i + confirmation_period - 1] <= df["bb_lower"].iloc[i + confirmation_period - 1] * (1 + bb_tolerance) and
+        df["volume"].iloc[i + confirmation_period - 1] > df["avg_volume_50"].iloc[i + confirmation_period - 1] * 1.0  # Réduit à 1.0
     )
     if buy_conditions:
         df.iloc[i + confirmation_period - 1, df.columns.get_loc("buy_signal")] = True
@@ -590,7 +577,7 @@ def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_thr
         log_message(f"   🔔 SIGNAL D'ACHAT CONFIRMÉ ! RSI={rsi_val:.2f} ≤ {rsi_buy_threshold}, ADX={adx_val:.2f} ≥ {adx_threshold}")
         log_message(f"   Détails : %Chg={pct_val:.2f}%, MACD Diff={macd_diff:.4f} ≤ {macd_threshold:.2f}, Tendance={trend}")
         log_message(f"   Bollinger : Prix={df['close'].iloc[i + confirmation_period - 1]:.2f} ≤ Bas={df['bb_lower'].iloc[i + confirmation_period - 1]:.2f}")
-        log_message(f"   Volume : {df['volume'].iloc[i + confirmation_period - 1]:.0f} > Moyenne x 0.8 = {df['avg_volume_50'].iloc[i + confirmation_period - 1] * 0.8:.0f}")
+        log_message(f"   Volume : {df['volume'].iloc[i + confirmation_period - 1]:.0f} > Moyenne x 1.0 = {df['avg_volume_50'].iloc[i + confirmation_period - 1]:.0f}")
     log_message("   Vérification conditions de vente...")
     sell_conditions = (
         df["pct_change"].iloc[i + confirmation_period - 1] >= rise_threshold and
@@ -599,10 +586,10 @@ def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_thr
         macd_diff <= macd_threshold and
         (
             trend in ["BEARISH", "NEUTRAL"] or
-            (trend == "BULLISH" and df["rsi"].iloc[i + confirmation_period - 1] > 75)
+            (trend == "BULLISH" and df["rsi"].iloc[i + confirmation_period - 1] > 65)
         ) and
-        df["close"].iloc[i + confirmation_period - 1] >= df["bb_upper"].iloc[i + confirmation_period - 1] * (1 - bb_tolerance_sell) and
-        df["volume"].iloc[i + confirmation_period - 1] > df["avg_volume_50"].iloc[i + confirmation_period - 1] * 1.5  # Plus dur pour SELL
+        df["close"].iloc[i + confirmation_period - 1] >= df["bb_upper"].iloc[i + confirmation_period - 1] * (1 - bb_tolerance) and
+        df["volume"].iloc[i + confirmation_period - 1] > df["avg_volume_50"].iloc[i + confirmation_period - 1] * 1.0
     )
     if sell_conditions:
         df.iloc[i + confirmation_period - 1, df.columns.get_loc("sell_signal")] = True
@@ -612,7 +599,7 @@ def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_thr
         log_message(f"   🔔 SIGNAL DE VENTE CONFIRMÉ ! RSI={rsi_val:.2f} ≥ {rsi_sell_threshold}, ADX={adx_val:.2f} ≥ {adx_threshold}")
         log_message(f"   Détails : %Chg={pct_val:.2f}%, MACD Diff={macd_diff:.4f} ≤ {macd_threshold:.2f}, Tendance={trend}")
         log_message(f"   Bollinger : Prix={df['close'].iloc[i + confirmation_period - 1]:.2f} ≥ Haut={df['bb_upper'].iloc[i + confirmation_period - 1]:.2f}")
-        log_message(f"   Volume : {df['volume'].iloc[i + confirmation_period - 1]:.0f} > Moyenne x 1.5 = {df['avg_volume_50'].iloc[i + confirmation_period - 1] * 1.5:.0f}")
+        log_message(f"   Volume : {df['volume'].iloc[i + confirmation_period - 1]:.0f} > Moyenne x 1.0 = {df['avg_volume_50'].iloc[i + confirmation_period - 1]:.0f}")
     last_row = df.iloc[-1]
     log_message(f"\n   📊 RÉSUMÉ ACTUEL : Prix={last_row['close']:.2f}, RSI={last_row['rsi']:.2f}, ADX={last_row['adx']:.2f}")
     log_message(f"   MACD Diff={macd_diff:.4f}, ATR={last_row['atr']:.2f}, Tendance={trend}")
@@ -631,10 +618,10 @@ def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_thr
             buy_reasons.append(f"MACD diff trop grande ({macd_diff:.4f} > {macd_threshold:.2f})")
         if trend not in ["BULLISH", "NEUTRAL"]:
             buy_reasons.append(f"Tendance défavorable ({trend})")
-        if last_row["close"] > last_row["bb_lower"] * (1 + bb_tolerance_buy):
-            buy_reasons.append(f"Prix pas proche du Bollinger bas ({last_row['close']:.2f} > {last_row['bb_lower']*(1+bb_tolerance_buy):.2f})")
-        if last_row["volume"] <= last_row["avg_volume_50"] * 0.8:
-            buy_reasons.append(f"Volume insuffisant ({last_row['volume']:.0f} <= {last_row['avg_volume_50']*0.8:.0f})")
+        if last_row["close"] > last_row["bb_lower"] * (1 + bb_tolerance):
+            buy_reasons.append(f"Prix pas proche du Bollinger bas ({last_row['close']:.2f} > {last_row['bb_lower']*(1+bb_tolerance):.2f})")
+        if last_row["volume"] <= last_row["avg_volume_50"] * 1.0:
+            buy_reasons.append(f"Volume insuffisant ({last_row['volume']:.0f} <= {last_row['avg_volume_50']*1.0:.0f})")
         # Raisons pour vente non validée
         if df["pct_change"].iloc[i + confirmation_period - 1] < rise_threshold:
             sell_reasons.append("Hausse pas confirmée sur la dernière bougie")
@@ -644,12 +631,12 @@ def detect_signals(df, df_trend, periods_back=60, confirmation_period=2, atr_thr
             sell_reasons.append(f"ADX trop bas ({last_row['adx']:.2f} < {adx_threshold})")
         if macd_diff > macd_threshold:
             sell_reasons.append(f"MACD diff trop grande ({macd_diff:.4f} > {macd_threshold:.2f})")
-        if trend not in ["BEARISH", "NEUTRAL"] and not (trend == "BULLISH" and last_row["rsi"] > 75):
+        if trend not in ["BEARISH", "NEUTRAL"] and not (trend == "BULLISH" and last_row["rsi"] > 65):
             sell_reasons.append(f"Tendance défavorable pour vente ({trend}, RSI={last_row['rsi']:.2f})")
-        if last_row["close"] < last_row["bb_upper"] * (1 - bb_tolerance_sell):
-            sell_reasons.append(f"Prix pas proche du Bollinger haut ({last_row['close']:.2f} < {last_row['bb_upper']*(1-bb_tolerance_sell):.2f})")
-        if last_row["volume"] <= last_row["avg_volume_50"] * 1.5:
-            sell_reasons.append(f"Volume insuffisant ({last_row['volume']:.0f} <= {last_row['avg_volume_50']*1.5:.0f})")
+        if last_row["close"] < last_row["bb_upper"] * (1 - bb_tolerance):
+            sell_reasons.append(f"Prix pas proche du Bollinger haut ({last_row['close']:.2f} < {last_row['bb_upper']*(1-bb_tolerance):.2f})")
+        if last_row["volume"] <= last_row["avg_volume_50"] * 1.0:
+            sell_reasons.append(f"Volume insuffisant ({last_row['volume']:.0f} <= {last_row['avg_volume_50']*1.0:.0f})")
         if buy_reasons:
             log_message("   - Raisons pas d'achat :")
             for reason in buy_reasons:
@@ -1169,23 +1156,20 @@ def optimize_parameters(headers, epic, initial_balance=10000.0, start_date=None,
     param_grid = {
         'sl_atr_multiplier': [1.5, 2.0, 2.5],
         'tp_atr_multiplier': [1.0, 1.5, 2.0],
-        'risk_per_trade': [0.3, 0.5, 0.7],
-        'rsi_buy_threshold': [40, 45, 50],  # Ajouté pour optimiser RSI
-        'rsi_sell_threshold': [65, 70, 75]
+        'risk_per_trade': [0.5, 0.8, 1.0]
     }
     log_message(f"   Grille testée : {len(list(itertools.product(*param_grid.values())))} combinaisons")
     best_sharpe = -np.inf
     best_params = None
     best_results = None
     for idx, params in enumerate(itertools.product(*param_grid.values()), 1):
-        sl, tp, risk, rsi_buy, rsi_sell = params
-        log_message(f"   Test {idx} : SL_mult={sl}, TP_mult={tp}, Risk={risk}, RSI_buy={rsi_buy}, RSI_sell={rsi_sell}")
+        sl, tp, risk = params
+        log_message(f"   Test {idx} : SL_mult={sl}, TP_mult={tp}, Risk={risk}")
         results = backtest_strategy(headers, epic, initial_balance, start_date, end_date, resolution,
                                    sl_atr_multiplier=sl, tp_atr_multiplier=tp, risk_per_trade=risk)
         if results and results['sharpe_ratio'] > best_sharpe:
             best_sharpe = results['sharpe_ratio']
-            best_params = {'sl_atr_multiplier': sl, 'tp_atr_multiplier': tp, 'risk_per_trade': risk,
-                           'rsi_buy_threshold': rsi_buy, 'rsi_sell_threshold': rsi_sell}
+            best_params = {'sl_atr_multiplier': sl, 'tp_atr_multiplier': tp, 'risk_per_trade': risk}
             best_results = results
             log_message(f"   🏆 Nouveau meilleur ! Sharpe = {best_sharpe:.2f}")
     log_message(f"\n✅ OPTIMISATION TERMINÉE : Meilleurs params = {best_params}")
@@ -1215,11 +1199,6 @@ def trading_bot(check_interval=60, confirmation_period=2, atr_threshold=4.0, mar
         try:
             log_message("   Check drawdown...")
             available, equity, funds = get_balances(auth_headers)  # Récupère aussi funds
-            # Top-up si funds bas
-            if funds < 100:
-                topup_account(auth_headers, 2000)
-                # Re-récupérer après top-up
-                available, equity, funds = get_balances(auth_headers)
             # Fermeture forcée si equity négative
             if equity < 0:
                 position = is_position_open(auth_headers, epic)
@@ -1315,7 +1294,7 @@ if __name__ == "__main__":
     log_message("Pour tester backtest, décommente les lignes ci-dessous.")
     # auth_headers = authenticate()
     # epic = search_market(auth_headers, MARKET)
-    # backtest_strategy(auth_headers, epic, start_date="2024-01-01", end_date="2024-09-30")
-    # optimize_parameters(auth_headers, epic, start_date="2024-01-01", end_date="2024-09-30")
+    # backtest_strategy(auth_headers, epic, start_date="2024-01-01", end_date="2024-12-31")
+    # optimize_parameters(auth_headers, epic, start_date="2024-01-01", end_date="2024-12-31")
     trading_bot(check_interval=CHECK_INTERVAL, confirmation_period=CONFIRMATION_PERIOD,
                 atr_threshold=ATR_THRESHOLD, market=MARKET)
